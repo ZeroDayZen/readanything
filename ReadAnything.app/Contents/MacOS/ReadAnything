@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Force native architecture (arm64 on Apple Silicon, x86_64 on Intel)
+# This prevents Rosetta from interfering with PyQt6
+export ARCHFLAGS="-arch $(uname -m)"
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+APP_DIR="$( cd "$SCRIPT_DIR/../.." && pwd )"
+# The .app bundle should be in the project root, so go up one level
+PROJECT_DIR="$( cd "$APP_DIR/.." && pwd )"
+
+# If venv is not found in the parent directory, try the current directory
+# (in case the .app was moved)
+if [ ! -d "$PROJECT_DIR/venv" ] && [ -d "$APP_DIR/venv" ]; then
+    PROJECT_DIR="$APP_DIR"
+fi
+
+# Change to project directory
+cd "$PROJECT_DIR" || {
+    osascript -e 'display dialog "Error: Could not find project directory." buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
+    exit 1
+}
+
+# Use the venv Python directly (don't rely on activation in non-interactive shell)
+PYTHON="$PROJECT_DIR/venv/bin/python3"
+
+# Check if venv exists
+if [ ! -d "$PROJECT_DIR/venv" ]; then
+    osascript -e 'display dialog "Error: Virtual environment not found. Please run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
+    exit 1
+fi
+
+# Check if venv Python exists
+if [ ! -f "$PYTHON" ]; then
+    osascript -e 'display dialog "Error: Python not found in virtual environment." buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
+    exit 1
+fi
+
+# Set up Python path to use venv packages
+export PATH="$PROJECT_DIR/venv/bin:$PATH"
+export VIRTUAL_ENV="$PROJECT_DIR/venv"
+
+# Check if main.py exists
+if [ ! -f "main.py" ]; then
+    osascript -e 'display dialog "Error: main.py not found in project directory." buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
+    exit 1
+fi
+
+# Set up environment for GUI application
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
+
+# Create a log file for debugging
+LOG_FILE="$HOME/Library/Logs/ReadAnything.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Ensure we're using the venv Python and it's the right architecture
+# Check Python architecture
+PYTHON_ARCH=$(file "$PYTHON" | grep -o "arm64\|x86_64" | head -1)
+
+# Verify we have the correct Python path (absolute)
+if [ ! -f "$PYTHON" ]; then
+    osascript -e "display dialog \"Error: Python not found at: $PYTHON\" buttons {\"OK\"} default button \"OK\" with icon stop" 2>/dev/null
+    exit 1
+fi
+
+# Run the application using the venv Python explicitly with full absolute path
+# Force arm64 on Apple Silicon to avoid Rosetta issues with PyQt6
+if [[ $(uname -m) == "arm64" ]]; then
+    # Use full absolute path and force arm64 architecture
+    arch -arm64 "$PYTHON" "$PROJECT_DIR/main.py" >> "$LOG_FILE" 2>&1
+    EXIT_CODE=$?
+else
+    "$PYTHON" "$PROJECT_DIR/main.py" >> "$LOG_FILE" 2>&1
+    EXIT_CODE=$?
+fi
+
+# If the app exits with an error, show a dialog with the error
+if [ $EXIT_CODE -ne 0 ]; then
+    ERROR_MSG=$(tail -3 "$LOG_FILE" 2>/dev/null | grep -v "^$" | tail -1 | cut -c1-100)
+    osascript -e "display dialog \"ReadAnything encountered an error.\\n\\nError: $ERROR_MSG\\n\\nFull log: $LOG_FILE\" buttons {\"OK\"} default button \"OK\" with icon stop" 2>/dev/null
+fi
+
