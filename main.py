@@ -34,17 +34,24 @@ class GlobalHotkeyThread(QThread):
         self.listener = None
         
     def run(self):
-        """Listen for global hotkey (Cmd+Shift+R)"""
+        """Listen for global hotkey (Cmd+Shift+R on macOS, Ctrl+Shift+R on Linux)"""
         if not PYNPUT_AVAILABLE:
             print("pynput not available, global hotkey disabled", file=sys.stderr)
             return
         
         try:
             print("Starting global hotkey listener...", file=sys.stderr)
-            # Define hotkey combination: Cmd+Shift+R
-            # On macOS, Cmd is 'cmd', Shift is 'shift'
+            # Define hotkey combination based on platform
+            # On macOS: Cmd+Shift+R, On Linux/Windows: Ctrl+Shift+R
+            if platform.system() == 'Darwin':
+                hotkey_str = '<cmd>+<shift>+r'
+                hotkey_msg = "Cmd+Shift+R"
+            else:
+                hotkey_str = '<ctrl>+<shift>+r'
+                hotkey_msg = "Ctrl+Shift+R"
+            
             hotkey = keyboard.HotKey(
-                keyboard.HotKey.parse('<cmd>+<shift>+r'),
+                keyboard.HotKey.parse(hotkey_str),
                 self._on_hotkey_pressed
             )
             
@@ -54,7 +61,7 @@ class GlobalHotkeyThread(QThread):
                 on_release=lambda k: hotkey.release(k)
             )
             self.listener.start()
-            print("Global hotkey listener started. Press Cmd+Shift+R to test.", file=sys.stderr)
+            print(f"Global hotkey listener started. Press {hotkey_msg} to test.", file=sys.stderr)
             self.listener.join()
         except Exception as e:
             print(f"Error in hotkey listener: {e}", file=sys.stderr)
@@ -257,6 +264,9 @@ class ReadAnythingApp(QMainWindow):
         self.setWindowTitle("ReadAnything")
         self.setGeometry(100, 100, 800, 600)
         
+        # Set window icon
+        self.set_window_icon()
+        
         # Create menu bar
         self.create_menu_bar()
         
@@ -378,6 +388,12 @@ class ReadAnythingApp(QMainWindow):
         # Status bar
         self.statusBar().showMessage("Ready")
     
+    def set_window_icon(self):
+        """Set the window icon"""
+        logo_path = os.path.join(os.path.dirname(__file__), 'logo_128.png')
+        if os.path.exists(logo_path):
+            self.setWindowIcon(QIcon(logo_path))
+    
     def create_menu_bar(self):
         """Create the menu bar with About menu"""
         menubar = self.menuBar()
@@ -393,7 +409,7 @@ class ReadAnythingApp(QMainWindow):
         """Show About dialog with usage instructions"""
         about_text = """
 <h2>ReadAnything</h2>
-<p><b>Version 1.0</b></p>
+<p><b>Version 1.0-beta</b></p>
 <p>A minimalistic text-to-speech application for macOS and Linux.</p>
 
 <h3>How to Use</h3>
@@ -408,10 +424,10 @@ class ReadAnythingApp(QMainWindow):
 <li><b>Clear:</b> Click "Clear" to clear the text area</li>
 </ol>
 
-<h4>Method 2: Global Hotkey (macOS)</h4>
+<h4>Method 2: Global Hotkey</h4>
 <ol>
 <li><b>Select Text:</b> Highlight any text in any application (browser, document, etc.)</li>
-<li><b>Press Hotkey:</b> Press <b>Cmd+Shift+R</b> to instantly read the selected text</li>
+<li><b>Press Hotkey:</b> Press <b>Cmd+Shift+R</b> (macOS) or <b>Ctrl+Shift+R</b> (Linux) to instantly read the selected text</li>
 <li>The app will automatically:
    <ul>
    <li>Copy the selected text</li>
@@ -430,14 +446,19 @@ class ReadAnythingApp(QMainWindow):
 <li>🎚️ <b>Customizable:</b> Adjustable speech speed and voice selection</li>
 </ul>
 
-<h4>Global Hotkey Setup (macOS)</h4>
-<p>If the global hotkey (Cmd+Shift+R) doesn't work:</p>
+<h4>Global Hotkey Setup</h4>
+<p><b>macOS:</b> If the global hotkey (Cmd+Shift+R) doesn't work:</p>
 <ol>
 <li>Open <b>System Settings</b> (or <b>System Preferences</b>)</li>
 <li>Go to <b>Privacy & Security</b> > <b>Accessibility</b></li>
 <li>Enable <b>Terminal</b> (if running from terminal) or <b>Python</b> (if running directly)</li>
 <li>If using the .app bundle, enable <b>ReadAnything</b></li>
 <li>Restart the application after granting permissions</li>
+</ol>
+<p><b>Linux:</b> For the hotkey (Ctrl+Shift+R) to work, install clipboard utilities:</p>
+<ol>
+<li>Install <b>xclip</b> or <b>xsel</b>: <code>sudo apt-get install xclip xsel</code></li>
+<li>The hotkey will use your system's primary selection or clipboard</li>
 </ol>
 
 <h4>Adding More Voices (macOS)</h4>
@@ -949,13 +970,75 @@ class ReadAnythingApp(QMainWindow):
             print(f"Error getting selected text: {e}", file=sys.stderr)
         return None
     
+    def get_selected_text_linux(self):
+        """Get selected text from Linux using xclip or xsel"""
+        try:
+            # Try xclip first (X11 - primary selection)
+            try:
+                result = subprocess.run(
+                    ['xclip', '-o', '-selection', 'primary'],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except FileNotFoundError:
+                pass
+            
+            # Fallback to xclip clipboard
+            try:
+                result = subprocess.run(
+                    ['xclip', '-o'],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except FileNotFoundError:
+                pass
+            
+            # Try xsel as fallback (primary selection)
+            try:
+                result = subprocess.run(
+                    ['xsel', '-p'],  # primary selection
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except FileNotFoundError:
+                pass
+            
+            # Try xsel clipboard
+            try:
+                result = subprocess.run(
+                    ['xsel', '-b'],  # clipboard
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except FileNotFoundError:
+                pass
+                
+        except Exception as e:
+            print(f"Error getting selected text on Linux: {e}", file=sys.stderr)
+        return None
+    
     def on_hotkey_pressed(self):
         """Called when global hotkey is pressed"""
         print("on_hotkey_pressed called in main thread", file=sys.stderr)
         try:
-            # Get selected text
+            # Get selected text based on platform
             print("Getting selected text...", file=sys.stderr)
-            selected_text = self.get_selected_text_macos()
+            if platform.system() == 'Darwin':
+                selected_text = self.get_selected_text_macos()
+            else:
+                selected_text = self.get_selected_text_linux()
             print(f"Got text: {selected_text[:50] if selected_text else 'None'}...", file=sys.stderr)
             
             if selected_text and selected_text.strip():
@@ -1009,7 +1092,11 @@ class ReadAnythingApp(QMainWindow):
             self.hotkey_thread.hotkey_pressed.connect(self.on_hotkey_pressed)
             self.hotkey_thread.start()
             print("Hotkey thread started", file=sys.stderr)
-            self.statusBar().showMessage("Global hotkey enabled: Cmd+Shift+R (select text and press to read)")
+            if platform.system() == 'Darwin':
+                hotkey_msg = "Cmd+Shift+R"
+            else:
+                hotkey_msg = "Ctrl+Shift+R"
+            self.statusBar().showMessage(f"Global hotkey enabled: {hotkey_msg} (select text and press to read)")
         except Exception as e:
             print(f"Error setting up global hotkey: {e}", file=sys.stderr)
             import traceback

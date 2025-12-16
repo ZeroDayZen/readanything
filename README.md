@@ -1,6 +1,18 @@
 # ReadAnything
 
+**Version: 1.0-beta**
+
 A minimalistic, cross-platform text-to-speech application with a clean GUI. Read text aloud on Linux and macOS.
+
+## What's New in 1.0-beta
+
+- ✅ **Full Linux Support**: Now works on Kali Linux and other Linux distributions
+- ✅ **Cross-Platform Hotkey**: Ctrl+Shift+R on Linux, Cmd+Shift+R on macOS
+- ✅ **App Icon**: Speech bubble logo added to window and app bundle
+- ✅ **About Menu**: Comprehensive usage guide and instructions
+- ✅ **Improved Text Selection**: Platform-specific implementations for better compatibility
+
+See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
 
 ## Features
 
