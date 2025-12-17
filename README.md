@@ -31,6 +31,21 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
 
 ## Installation
 
+### Quick Install (Kali Linux / Linux)
+
+**Option 1: GUI Installer (Recommended)**
+```bash
+git clone https://github.com/ZeroDayZen/readanything.git
+cd readanything
+python3 installer.py
+```
+The GUI installer will guide you through installing all dependencies and running the application.
+
+**Option 2: Manual Installation**
+See [INSTALL_KALI.md](INSTALL_KALI.md) for detailed step-by-step instructions for Kali Linux.
+
+### Manual Installation (All Platforms)
+
 ### 1. Clone the repository
 
 ```bash
@@ -83,6 +98,13 @@ Simply double-click `ReadAnything.app` in Finder to launch the application. The 
 
 **Option 2: Command Line**
 
+**Using the installer (Linux):**
+```bash
+python3 installer.py
+# Click "▶ Run ReadAnything" button
+```
+
+**Or run directly:**
 ```bash
 python3 main.py
 ```
@@ -115,6 +137,12 @@ The application features a clean, minimalistic interface with:
 - Intuitive playback controls
 - Voice and speed customization options
 - Real-time word highlighting during playback
+
+## Documentation
+
+- **[INSTALL_KALI.md](INSTALL_KALI.md)** - Detailed installation guide for Kali Linux
+- **[LINUX_COMPATIBILITY.md](LINUX_COMPATIBILITY.md)** - Linux compatibility information
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
 
 ## Troubleshooting
 
