@@ -334,7 +334,7 @@ class ReadAnythingApp(QMainWindow):
         self.text_area = QTextEdit()
         self.text_area.setPlaceholderText("Type or paste your text here...")
         self.text_area.setFont(QFont("Arial", 12))
-        self.text_area.setStyleSheet("background-color: white;")
+        self.text_area.setStyleSheet("background-color: white; color: black;")
         layout.addWidget(self.text_area)
         
         # Controls section
