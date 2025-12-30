@@ -184,6 +184,9 @@ class TextToSpeechThread(QThread):
             import traceback
             traceback.print_exc()
             self.error.emit(error_msg)
+        finally:
+            # Always clean up the engine when thread finishes
+            self._cleanup_engine()
     
     def _run_pyttsx3(self):
         """Run TTS using pyttsx3 (for non-macOS or fallback)"""
@@ -198,52 +201,78 @@ class TextToSpeechThread(QThread):
         self.engine.say(self.text)
         
         # Use startLoop() and iterate() to avoid event loop conflicts
+        # iterate() must be called repeatedly in a loop to process the event queue
         try:
             self.engine.startLoop(False)
-            try:
-                iterate_result = self.engine.iterate()
-                # Check if iterate() returned None (can happen on some Linux systems)
-                if iterate_result is not None:
+            
+            # Keep calling iterate() in a loop until speech completes
+            # iterate() returns a generator that yields once per call
+            # We need to call it repeatedly to process the event queue
+            max_iterations = 10000  # Safety limit to prevent infinite loops
+            iteration_count = 0
+            
+            while self._is_running and iteration_count < max_iterations:
+                try:
+                    # Call iterate() to get the generator for this iteration
+                    iterate_result = self.engine.iterate()
+                    
+                    if iterate_result is None:
+                        # iterate() returned None - this shouldn't happen normally
+                        # but can occur on some systems. Use time estimation as fallback.
+                        chars_per_second = max(5, self.rate / 12.0)
+                        estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
+                        estimated_ms = max(500, min(estimated_ms, 30000))
+                        
+                        waited = 0
+                        while waited < estimated_ms and self._is_running:
+                            self.msleep(100)
+                            waited += 100
+                        break
+                    
+                    # Iterate over the generator once (processes one event loop iteration)
                     try:
                         for _ in iterate_result:
-                            if not self._is_running:
-                                self.engine.endLoop()
-                                break
-                            self.msleep(10)
+                            # Process one iteration - the generator yields once
+                            pass
                     except StopIteration:
-                        # Normal end of iteration
+                        # Generator exhausted for this iteration
                         pass
-                else:
-                    # If iterate() returns None, wait for speech to complete
-                    # Estimate time based on text length and rate
-                    # Average: ~150 WPM = ~2.5 words/sec = ~12.5 chars/sec (rough estimate)
-                    chars_per_second = max(5, self.rate / 12.0)  # Rough estimate
-                    estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
-                    estimated_ms = max(500, min(estimated_ms, 30000))  # Between 0.5s and 30s
                     
-                    waited = 0
-                    while waited < estimated_ms and self._is_running:
-                        self.msleep(100)
-                        waited += 100
-            except TypeError as e:
-                # Handle "'NoneType' object is not iterable" - this happens
-                # when iterate() returns None and we try to iterate over it
-                # Speech may have already started, so wait for it to complete
-                if "'NoneType' object is not iterable" in str(e) or "not iterable" in str(e):
-                    # Wait for speech to complete (same estimation as above)
-                    chars_per_second = max(5, self.rate / 12.0)
-                    estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
-                    estimated_ms = max(500, min(estimated_ms, 30000))
+                    # Check if engine is still busy (speech in progress)
+                    # Use internal API carefully - only if available
+                    try:
+                        if hasattr(self.engine, '_proxy') and hasattr(self.engine._proxy, 'isBusy'):
+                            if not self.engine._proxy.isBusy():
+                                # Speech is complete
+                                break
+                    except:
+                        # Can't check busy state, continue iterating
+                        pass
                     
-                    waited = 0
-                    while waited < estimated_ms and self._is_running:
-                        self.msleep(100)
-                        waited += 100
-                else:
-                    # Re-raise if it's a different TypeError
-                    raise
-            self.engine.endLoop()
-        except StopIteration:
+                    iteration_count += 1
+                    # Small delay between iterations
+                    self.msleep(10)
+                    
+                except TypeError as e:
+                    # Handle "'NoneType' object is not iterable"
+                    if "'NoneType' object is not iterable" in str(e) or "not iterable" in str(e):
+                        # iterate() may have returned None, use time estimation
+                        chars_per_second = max(5, self.rate / 12.0)
+                        estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
+                        estimated_ms = max(500, min(estimated_ms, 30000))
+                        
+                        waited = 0
+                        while waited < estimated_ms and self._is_running:
+                            self.msleep(100)
+                            waited += 100
+                        break
+                    else:
+                        # Different TypeError, re-raise
+                        raise
+                except StopIteration:
+                    # Outer StopIteration - should not happen but handle gracefully
+                    break
+            
             self.engine.endLoop()
         except Exception as e:
             try:
@@ -251,6 +280,23 @@ class TextToSpeechThread(QThread):
             except:
                 pass
             raise e
+    
+    def _cleanup_engine(self):
+        """Clean up the TTS engine resources"""
+        if self.engine:
+            try:
+                # Stop the engine first
+                self.engine.stop()
+            except:
+                pass
+            try:
+                # Destroy the engine to free resources
+                if hasattr(self.engine, 'destroy'):
+                    self.engine.destroy()
+            except:
+                pass
+            # Clear the reference
+            self.engine = None
     
     def stop(self):
         self._is_running = False
@@ -260,12 +306,8 @@ class TextToSpeechThread(QThread):
                 self._process.terminate()
             except:
                 pass
-        # Stop engine if available
-        if self.engine:
-            try:
-                self.engine.stop()
-            except:
-                pass
+        # Clean up engine
+        self._cleanup_engine()
 
 
 class ReadAnythingApp(QMainWindow):
@@ -827,11 +869,15 @@ class ReadAnythingApp(QMainWindow):
                 traceback.print_exc()
                 self.play_btn.setEnabled(True)
                 self.statusBar().showMessage("Error: Thread creation failed")
-                try:
-                    if engine:
+                # Clean up engine if thread creation failed
+                if engine:
+                    try:
                         engine.stop()
-                except:
-                    pass
+                        if hasattr(engine, 'destroy'):
+                            engine.destroy()
+                    except:
+                        pass
+                    engine = None
             except Exception as thread_error:
                 # Re-enable play button on error
                 self.play_btn.setEnabled(True)
@@ -841,11 +887,14 @@ class ReadAnythingApp(QMainWindow):
                 import traceback
                 traceback.print_exc()
                 # Clean up engine if thread creation failed
-                try:
-                    if engine:
+                if engine:
+                    try:
                         engine.stop()
-                except:
-                    pass
+                        if hasattr(engine, 'destroy'):
+                            engine.destroy()
+                    except:
+                        pass
+                    engine = None
                 try:
                     QMessageBox.critical(self, "Error", f"Failed to start speech: {error_msg}")
                 except:
@@ -888,7 +937,7 @@ class ReadAnythingApp(QMainWindow):
             # Re-enable play button
             self.play_btn.setEnabled(True)
             self.statusBar().showMessage("Finished")
-            # Don't try to clean up the engine here - it's managed by the thread
+            # Engine cleanup is handled by the thread's run() method finally block
         except Exception as e:
             # Log error but don't crash the app
             print(f"Error in on_speech_finished: {e}", file=sys.stderr)
