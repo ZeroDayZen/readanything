@@ -200,16 +200,56 @@ class TextToSpeechThread(QThread):
         # Use startLoop() and iterate() to avoid event loop conflicts
         try:
             self.engine.startLoop(False)
-            for _ in self.engine.iterate():
-                if not self._is_running:
-                    self.engine.endLoop()
-                    break
-                self.msleep(10)
+            try:
+                iterate_result = self.engine.iterate()
+                # Check if iterate() returned None (can happen on some Linux systems)
+                if iterate_result is not None:
+                    try:
+                        for _ in iterate_result:
+                            if not self._is_running:
+                                self.engine.endLoop()
+                                break
+                            self.msleep(10)
+                    except StopIteration:
+                        # Normal end of iteration
+                        pass
+                else:
+                    # If iterate() returns None, wait for speech to complete
+                    # Estimate time based on text length and rate
+                    # Average: ~150 WPM = ~2.5 words/sec = ~12.5 chars/sec (rough estimate)
+                    chars_per_second = max(5, self.rate / 12.0)  # Rough estimate
+                    estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
+                    estimated_ms = max(500, min(estimated_ms, 30000))  # Between 0.5s and 30s
+                    
+                    waited = 0
+                    while waited < estimated_ms and self._is_running:
+                        self.msleep(100)
+                        waited += 100
+            except TypeError as e:
+                # Handle "'NoneType' object is not iterable" - this happens
+                # when iterate() returns None and we try to iterate over it
+                # Speech may have already started, so wait for it to complete
+                if "'NoneType' object is not iterable" in str(e) or "not iterable" in str(e):
+                    # Wait for speech to complete (same estimation as above)
+                    chars_per_second = max(5, self.rate / 12.0)
+                    estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
+                    estimated_ms = max(500, min(estimated_ms, 30000))
+                    
+                    waited = 0
+                    while waited < estimated_ms and self._is_running:
+                        self.msleep(100)
+                        waited += 100
+                else:
+                    # Re-raise if it's a different TypeError
+                    raise
             self.engine.endLoop()
         except StopIteration:
             self.engine.endLoop()
         except Exception as e:
-            self.engine.endLoop()
+            try:
+                self.engine.endLoop()
+            except:
+                pass
             raise e
     
     def stop(self):
@@ -690,9 +730,22 @@ class ReadAnythingApp(QMainWindow):
         else:
             # Use pyttsx3 voices for non-macOS
             if self.engine and self.voices:
-                for i, voice in enumerate(self.voices):
-                    name = voice.name
-                    self.voice_combo.addItem(name, voice.id)
+                try:
+                    # Ensure voices is iterable (not None)
+                    if self.voices is not None:
+                        for i, voice in enumerate(self.voices):
+                            try:
+                                name = voice.name if hasattr(voice, 'name') else str(voice)
+                                voice_id = voice.id if hasattr(voice, 'id') else None
+                                self.voice_combo.addItem(name, voice_id)
+                            except Exception as e:
+                                print(f"Error adding voice: {e}", file=sys.stderr)
+                                continue
+                    else:
+                        self.voice_combo.addItem("Default", None)
+                except Exception as e:
+                    print(f"Error populating voices: {e}", file=sys.stderr)
+                    self.voice_combo.addItem("Default", None)
             else:
                 self.voice_combo.addItem("Default", None)
     
