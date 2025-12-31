@@ -150,6 +150,42 @@ chmod +x main.py
 chmod +x installer.py
 ```
 
+## Updating
+
+### Option 1: GUI Updater (Recommended)
+
+Use the GUI updater to easily update to the latest version:
+
+```bash
+python3 update.py
+```
+
+The updater will:
+- ✓ Check for available updates from GitHub
+- ✓ Fetch and pull the latest version
+- ✓ Optionally update Python dependencies
+- ✓ Handle local changes automatically
+
+### Option 2: Manual Update
+
+Update manually using git:
+
+```bash
+# Fetch latest changes
+git fetch origin
+
+# Pull latest version
+git pull origin main
+
+# Update dependencies (if using venv)
+source venv/bin/activate
+pip install -r requirements.txt --upgrade
+```
+
+**Note:** The updater requires the repository to be cloned using `git clone`. If you downloaded a ZIP file, you'll need to clone the repository to enable updates.
+
+For detailed step-by-step manual update instructions, see [MANUAL_UPDATE.md](../MANUAL_UPDATE.md).
+
 ## Uninstallation
 
 ### Option 1: GUI Uninstaller (Recommended)

@@ -86,6 +86,41 @@ sudo dnf install espeak espeak-devel
 sudo pacman -S espeak
 ```
 
+## Updating
+
+To update ReadAnything to the latest version from GitHub, use the GUI updater:
+
+```bash
+python3 update.py
+```
+
+The updater will:
+- Fetch the latest changes from GitHub
+- Check if updates are available
+- Pull the latest version
+- Optionally update Python dependencies
+- Handle uncommitted local changes (stash if needed)
+
+**Manual Update:**
+
+If you prefer to update manually:
+
+```bash
+# Fetch latest changes
+git fetch origin
+
+# Pull latest version
+git pull origin main
+
+# Update dependencies (if needed)
+source venv/bin/activate  # Activate venv if using one
+pip install -r requirements.txt --upgrade
+```
+
+**Note:** The updater requires the repository to be cloned using `git clone`. If you downloaded a ZIP file, you'll need to clone the repository to enable updates.
+
+For detailed manual update instructions, see [MANUAL_UPDATE.md](MANUAL_UPDATE.md).
+
 ## Uninstallation
 
 To remove ReadAnything from your system, use the GUI uninstaller:
