@@ -152,7 +152,24 @@ chmod +x installer.py
 
 ## Uninstallation
 
-To remove ReadAnything:
+### Option 1: GUI Uninstaller (Recommended)
+
+Use the GUI uninstaller for an easy removal process:
+
+```bash
+python3 uninstall.py
+```
+
+The uninstaller provides:
+- ✓ Automatic removal of virtual environment
+- ✓ Removal of desktop shortcuts
+- ✓ Optional removal of system dependencies
+- ✓ Optional removal of project directory
+- ✓ Clear status messages and error handling
+
+### Option 2: Manual Uninstallation
+
+If you prefer to uninstall manually:
 
 ```bash
 # Remove virtual environment
@@ -165,6 +182,14 @@ rm ~/.local/share/applications/readanything.desktop
 cd ..
 rm -rf readanything
 ```
+
+**Note:** If you installed system dependencies specifically for ReadAnything and want to remove them:
+
+```bash
+sudo apt-get remove espeak espeak-data libespeak1 libespeak-dev python3-pyqt6 python3-pyqt6.qtmultimedia xclip xsel
+```
+
+**Warning:** Only remove system dependencies if they're not used by other applications on your system.
 
 ## Next Steps
 

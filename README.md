@@ -86,6 +86,39 @@ sudo dnf install espeak espeak-devel
 sudo pacman -S espeak
 ```
 
+## Uninstallation
+
+To remove ReadAnything from your system, use the GUI uninstaller:
+
+```bash
+python3 uninstall.py
+```
+
+The uninstaller will:
+- Remove the virtual environment (`venv/`)
+- Remove desktop shortcuts (Linux) or application bundle (macOS)
+- Optionally remove system dependencies (Linux only)
+- Optionally remove the entire project directory
+
+**Manual Uninstallation:**
+
+If you prefer to uninstall manually:
+
+```bash
+# Remove virtual environment
+rm -rf venv
+
+# Remove desktop shortcut (Linux)
+rm ~/.local/share/applications/readanything.desktop
+
+# Remove application bundle (macOS, if copied to Applications)
+rm -rf /Applications/ReadAnything.app
+
+# Remove project directory (optional)
+cd ..
+rm -rf readanything
+```
+
 ## Usage
 
 ### Running the Application
