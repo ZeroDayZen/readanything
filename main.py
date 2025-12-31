@@ -222,6 +222,8 @@ class TextToSpeechThread(QThread):
                         chars_per_second = max(5, self.rate / 12.0)
                         estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
                         estimated_ms = max(500, min(estimated_ms, 30000))
+                        # Add buffer time to ensure last word is fully spoken (Linux TTS needs this)
+                        estimated_ms += 800  # Extra 800ms buffer for final word enunciation
                         
                         waited = 0
                         while waited < estimated_ms and self._is_running:
@@ -240,14 +242,27 @@ class TextToSpeechThread(QThread):
                     
                     # Check if engine is still busy (speech in progress)
                     # Use internal API carefully - only if available
+                    speech_complete = False
                     try:
                         if hasattr(self.engine, '_proxy') and hasattr(self.engine._proxy, 'isBusy'):
                             if not self.engine._proxy.isBusy():
-                                # Speech is complete
-                                break
+                                # Speech appears complete, but wait a bit more to ensure
+                                # the last word is fully enunciated (Linux engines need extra time)
+                                # Wait a short delay to allow final word to complete
+                                self.msleep(200)  # 200ms delay for last word
+                                
+                                # Double-check that it's still not busy
+                                if not self.engine._proxy.isBusy():
+                                    speech_complete = True
                     except:
                         # Can't check busy state, continue iterating
                         pass
+                    
+                    if speech_complete:
+                        # Additional delay to ensure last word is fully spoken
+                        # This helps with Linux TTS engines that cut off early
+                        self.msleep(300)  # Extra 300ms for final enunciation
+                        break
                     
                     iteration_count += 1
                     # Small delay between iterations
@@ -260,6 +275,8 @@ class TextToSpeechThread(QThread):
                         chars_per_second = max(5, self.rate / 12.0)
                         estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
                         estimated_ms = max(500, min(estimated_ms, 30000))
+                        # Add buffer time to ensure last word is fully spoken (Linux TTS needs this)
+                        estimated_ms += 800  # Extra 800ms buffer for final word enunciation
                         
                         waited = 0
                         while waited < estimated_ms and self._is_running:
@@ -273,10 +290,20 @@ class TextToSpeechThread(QThread):
                     # Outer StopIteration - should not happen but handle gracefully
                     break
             
+            # Give the engine a moment to finish any remaining audio buffer
+            # This helps prevent cutting off the last word on Linux
+            self.msleep(500)  # 500ms buffer for final audio to play
+            
             self.engine.endLoop()
+            
+            # Final delay after ending loop to ensure audio completes
+            # Linux TTS engines may need this extra time for proper enunciation
+            self.msleep(300)
         except Exception as e:
             try:
                 self.engine.endLoop()
+                # Also add delay in error case to allow cleanup
+                self.msleep(200)
             except:
                 pass
             raise e
