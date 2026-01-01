@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.2.1"
-VERSION_NAME = "1.2.1"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.3.0"
+VERSION_NAME = "1.3.0"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -594,6 +594,66 @@ class TextToSpeechThread(QThread):
             raise
 
 
+class PreGenerateAudioThread(QThread):
+    """Background thread to pre-generate audio for faster playback"""
+    audio_ready = pyqtSignal(bytes, str, str, int)  # audio_data, text_hash, voice_id, speed
+    
+    def __init__(self, text, voice_id, speed):
+        super().__init__()
+        self.text = text
+        self.voice_id = voice_id
+        self.speed = speed
+        self._is_running = True
+        self.setTerminationEnabled(False)
+    
+    def run(self):
+        """Pre-generate audio in background"""
+        if not EDGE_TTS_AVAILABLE:
+            return
+        
+        try:
+            import asyncio
+            import hashlib
+            
+            # Create hash for cache key
+            text_hash = hashlib.md5(f"{self.text}|{self.voice_id}|{self.speed}".encode()).hexdigest()
+            
+            # Generate audio
+            async def generate():
+                communicate = edge_tts.Communicate(
+                    text=self.text, 
+                    voice=self.voice_id if self.voice_id else "en-US-AriaNeural"
+                )
+                
+                # Collect all audio chunks
+                audio_data = b""
+                async for chunk in communicate.stream():
+                    if not self._is_running:
+                        return None
+                    if chunk["type"] == "audio":
+                        audio_data += chunk["data"]
+                
+                return audio_data
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                audio_data = loop.run_until_complete(generate())
+            finally:
+                loop.close()
+            
+            # Emit signal if audio was generated and thread is still running
+            if audio_data and self._is_running:
+                self.audio_ready.emit(audio_data, text_hash, self.voice_id, self.speed)
+        except Exception as e:
+            # Silently fail - pre-generation is optional
+            print(f"Pre-generation error (non-critical): {e}", file=sys.stderr)
+    
+    def stop(self):
+        """Stop pre-generation"""
+        self._is_running = False
+
+
 class ReadAnythingApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -608,6 +668,13 @@ class ReadAnythingApp(QMainWindow):
         self.original_format = QTextCharFormat()
         # Global hotkey
         self.hotkey_thread = None
+        # Audio pre-generation cache
+        self.audio_cache = {}  # {cache_key: audio_data}
+        self.pregen_thread = None
+        self.text_change_timer = QTimer()
+        self.text_change_timer.setSingleShot(True)
+        self.text_change_timer.timeout.connect(self.on_text_changed_debounced)
+        self._cached_audio_process = None  # For cached audio playback
         # Don't initialize pyttsx3 engine - we're using Edge TTS only
         self.init_ui()
         self.setup_global_hotkey()
@@ -701,6 +768,8 @@ class ReadAnythingApp(QMainWindow):
         self.text_area.setPlaceholderText("Type or paste your text here...")
         self.text_area.setFont(QFont("Arial", 12))
         self.text_area.setStyleSheet("background-color: white; color: black;")
+        # Connect text change signal for pre-generation
+        self.text_area.textChanged.connect(self.on_text_changed)
         layout.addWidget(self.text_area)
         
         # Controls section
@@ -715,6 +784,7 @@ class ReadAnythingApp(QMainWindow):
         
         self.voice_combo = QComboBox()
         self.populate_voices()
+        self.voice_combo.currentIndexChanged.connect(self.on_voice_or_speed_changed)
         voice_layout.addWidget(self.voice_combo)
         controls_layout.addLayout(voice_layout)
         
@@ -729,6 +799,7 @@ class ReadAnythingApp(QMainWindow):
         self.speed_slider.setMaximum(300)
         self.speed_slider.setValue(150)
         self.speed_slider.valueChanged.connect(self.update_speed_label)
+        self.speed_slider.valueChanged.connect(self.on_voice_or_speed_changed)
         speed_layout.addWidget(self.speed_slider)
         
         self.speed_label = QLabel("150")
@@ -1290,6 +1361,87 @@ class ReadAnythingApp(QMainWindow):
         """Update speed label when slider changes"""
         self.speed_label.setText(str(value))
     
+    def on_text_changed(self):
+        """Handle text area changes - debounce and trigger pre-generation"""
+        # Reset debounce timer (500ms delay)
+        self.text_change_timer.stop()
+        self.text_change_timer.start(500)  # Wait 500ms after typing stops
+    
+    def on_text_changed_debounced(self):
+        """Called after text change debounce - analyze and pre-generate if needed"""
+        text = self.text_area.toPlainText().strip()
+        
+        if not text:
+            # Clear cache if text is empty
+            self.audio_cache.clear()
+            if self.pregen_thread and self.pregen_thread.isRunning():
+                self.pregen_thread.stop()
+                self.pregen_thread.wait(100)
+            return
+        
+        # Analyze text and prepare word positions for highlighting
+        self.prepare_word_positions(text)
+        
+        # Pre-generate audio for short text (< 500 chars)
+        text_length = len(text)
+        if text_length < 500:
+            self._start_pre_generation(text)
+        else:
+            # For longer text, just clear any old cache
+            self.audio_cache.clear()
+            if self.pregen_thread and self.pregen_thread.isRunning():
+                self.pregen_thread.stop()
+                self.pregen_thread.wait(100)
+    
+    def on_voice_or_speed_changed(self):
+        """Handle voice or speed changes - invalidate cache"""
+        # Clear cache when voice or speed changes
+        self.audio_cache.clear()
+        
+        # Stop any ongoing pre-generation
+        if self.pregen_thread and self.pregen_thread.isRunning():
+            self.pregen_thread.stop()
+            self.pregen_thread.wait(100)
+        
+        # Restart pre-generation if text exists
+        text = self.text_area.toPlainText().strip()
+        if text and len(text) < 500:
+            self._start_pre_generation(text)
+    
+    def _start_pre_generation(self, text):
+        """Start background audio pre-generation"""
+        if not EDGE_TTS_AVAILABLE:
+            return
+        
+        # Stop any existing pre-generation
+        if self.pregen_thread and self.pregen_thread.isRunning():
+            self.pregen_thread.stop()
+            self.pregen_thread.wait(100)
+        
+        # Get current voice and speed
+        voice_id = self.voice_combo.currentData()
+        speed = self.speed_slider.value()
+        
+        if not voice_id:
+            return
+        
+        # Start new pre-generation thread
+        self.pregen_thread = PreGenerateAudioThread(text, voice_id, speed)
+        self.pregen_thread.audio_ready.connect(self.on_audio_pre_generated)
+        self.pregen_thread.start()
+    
+    def on_audio_pre_generated(self, audio_data, text_hash, voice_id, speed):
+        """Called when audio pre-generation completes - store in cache"""
+        # Create cache key
+        cache_key = f"{text_hash}_{voice_id}_{speed}"
+        self.audio_cache[cache_key] = audio_data
+    
+    def _get_cache_key(self, text, voice_id, speed):
+        """Generate cache key for given text, voice, and speed"""
+        import hashlib
+        text_hash = hashlib.md5(f"{text}|{voice_id}|{speed}".encode()).hexdigest()
+        return f"{text_hash}_{voice_id}_{speed}"
+    
     def play_text(self):
         """Play the text using text-to-speech (Edge TTS only)"""
         try:
@@ -1317,10 +1469,21 @@ class ReadAnythingApp(QMainWindow):
                 return
             speed = self.speed_slider.value()
             
+            # Check if we have pre-generated audio in cache
+            cache_key = self._get_cache_key(text, voice_id, speed)
+            cached_audio = self.audio_cache.get(cache_key)
+            
             # Always use Edge TTS
             tts_engine_type = 'edge-tts'
             engine = None  # Not used for Edge TTS
             
+            # If we have cached audio, use it for instant playback
+            if cached_audio:
+                # Use cached audio - this will be much faster
+                self._play_cached_audio(cached_audio, text, speed)
+                return
+            
+            # No cached audio - generate on demand (normal flow)
             # Create and start thread
             try:
                 # Create thread object with Edge TTS engine type
@@ -1433,6 +1596,98 @@ class ReadAnythingApp(QMainWindow):
                 self.statusBar().showMessage("Finished (with warning)")
             except:
                 pass  # If even this fails, just continue
+    
+    def _play_cached_audio(self, audio_data, text, speed):
+        """Play pre-generated audio from cache for instant playback"""
+        import tempfile
+        import threading
+        
+        temp_path = None
+        playback_process = None
+        is_running = True
+        
+        try:
+            # Write cached audio to temp file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_path = temp_file.name
+            temp_file.write(audio_data)
+            temp_file.close()
+            
+            # Start playback immediately
+            if platform.system() == 'Darwin':
+                playback_process = subprocess.Popen(['afplay', temp_path])
+            elif platform.system() == 'Linux':
+                # Use streaming-capable players
+                players = [
+                    ('mpg123', ['-q', temp_path]),
+                    ('mpv', ['--no-video', '--cache=no', temp_path]),
+                    ('ffplay', ['-autoexit', '-nodisp', temp_path]),
+                ]
+                
+                for player_name, player_args in players:
+                    try:
+                        playback_process = subprocess.Popen(
+                            [player_name] + player_args,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                        if playback_process and playback_process.poll() is None:
+                            break
+                        else:
+                            if playback_process:
+                                playback_process.terminate()
+                            playback_process = None
+                    except FileNotFoundError:
+                        continue
+                    except Exception:
+                        if playback_process:
+                            try:
+                                playback_process.terminate()
+                            except:
+                                pass
+                        playback_process = None
+                        continue
+                
+                if not playback_process:
+                    raise Exception("No audio player found")
+            else:
+                # Windows
+                playback_process = subprocess.Popen(['start', '/min', temp_path], shell=True)
+            
+            # Store process reference for stop functionality
+            self._cached_audio_process = playback_process
+            
+            # Start word highlighting
+            self.start_highlighting(text, speed)
+            
+            # Update UI
+            self.play_btn.setEnabled(False)
+            self.statusBar().showMessage("Playing...")
+            
+            # Wait for playback to complete in a separate thread to avoid blocking
+            def wait_for_playback():
+                if playback_process:
+                    playback_process.wait()
+                    # Use QTimer to call on_speech_finished in main thread
+                    QTimer.singleShot(0, self.on_speech_finished)
+                    # Clean up temp file
+                    if temp_path and os.path.exists(temp_path):
+                        try:
+                            os.unlink(temp_path)
+                        except:
+                            pass
+            
+            playback_thread = threading.Thread(target=wait_for_playback, daemon=True)
+            playback_thread.start()
+            
+        except Exception as e:
+            print(f"Error playing cached audio: {e}", file=sys.stderr)
+            self.on_speech_error(str(e))
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
     
     def prepare_word_positions(self, text):
         """Prepare list of word positions in the text"""
