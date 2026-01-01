@@ -1,9 +1,7 @@
 PyQt6>=6.6.1
 pyttsx3==2.90
 pynput>=1.7.6
-
-# Optional AI TTS library (install separately if desired)
-# Edge TTS (free, local AI TTS): pip install edge-tts
+edge-tts>=6.1.0
 
 # Optional AI TTS libraries (install separately if desired)
 # gTTS (free, requires internet): pip install gtts

@@ -2,40 +2,45 @@
 
 ## Current Status
 
-The app **will work on Kali Linux** with some limitations and required setup.
+The app **will work on Kali Linux** with Edge TTS (AI-powered text-to-speech).
 
 ### ✅ What Works Out of the Box
 
-- **Text-to-Speech**: Uses `pyttsx3` which works on Linux
+- **Text-to-Speech**: Uses `edge-tts` (Microsoft Azure Neural TTS) - works on Linux
 - **GUI Interface**: PyQt6 is fully cross-platform
 - **Word Highlighting**: Platform-independent feature
-- **Voice Selection**: Will use available `pyttsx3` voices
+- **Voice Selection**: All Edge TTS English US voices available in dropdown
 - **Speed Control**: Works on all platforms
+- **High-Quality Voices**: Neural AI voices with natural sound
 
 ### ⚠️ What Needs Setup
 
-1. **TTS Backend**: Linux needs a TTS engine installed
-2. **Global Hotkey**: Currently hardcoded for macOS (`Cmd+Shift+R`)
-3. **Selected Text Capture**: Uses macOS AppleScript (won't work on Linux)
+1. **Internet Connection**: Required for first voice download (works offline after)
+2. **Audio Player**: Linux needs an audio player (paplay, aplay, mpg123, or mpv)
+3. **Global Hotkey**: Platform-aware (Ctrl+Shift+R on Linux)
 
 ## Installation on Kali Linux
 
 ### 1. Install System Dependencies
 
 ```bash
-# Install TTS backend (espeak is recommended)
+# Update package list
 sudo apt-get update
-sudo apt-get install espeak espeak-data libespeak1 libespeak-dev
 
 # Install PyQt6 system dependencies
 sudo apt-get install python3-pyqt6 python3-pyqt6.qtmultimedia
 
-# Install clipboard utilities (for future hotkey feature)
+# Install audio player (for playing Edge TTS audio files)
+sudo apt-get install pulseaudio-utils mpg123
+
+# Install clipboard utilities (for hotkey feature)
 sudo apt-get install xclip xsel
 
-# Install audio system
+# Install audio system (if not already installed)
 sudo apt-get install alsa-utils pulseaudio
 ```
+
+**Note**: Edge TTS is a Python package and doesn't require system TTS engines like `espeak` or `festival`. The audio player is only needed to play the generated audio files.
 
 ### 2. Install Python Dependencies
 
@@ -44,7 +49,7 @@ sudo apt-get install alsa-utils pulseaudio
 python3 -m venv venv
 source venv/bin/activate
 
-# Install requirements
+# Install requirements (includes edge-tts)
 pip install -r requirements.txt
 ```
 
@@ -54,6 +59,8 @@ pip install -r requirements.txt
 source venv/bin/activate
 python3 main.py
 ```
+
+**First Run**: On first use, Edge TTS will download voice models (one-time, ~5-10MB per voice). After that, it works completely offline!
 
 ## Known Limitations on Linux
 
@@ -68,42 +75,27 @@ python3 main.py
 
 **Temporary Solution**: Use the app manually - paste text and click Play
 
-### 2. Voice Selection and Quality
+### 2. Edge TTS Voice Selection
 
-**Current Issue**: Voice detection uses macOS `say` command
+**How It Works**: The app uses Edge TTS which provides high-quality neural AI voices from Microsoft Azure.
 
-**Workaround**: The app falls back to `pyttsx3` voice detection, which should work but may show fewer voices than macOS
+**Available Voices**: 
+- All English US (en-US) voices from Edge TTS
+- Voices are automatically fetched and displayed in the dropdown
+- Includes voices like: Aria, Jenny, Guy, Jane, Jason, Nancy, Tony, and many more
+- Each voice shows gender information (e.g., "Aria (Female)")
 
-**Improving Voice Quality on Linux:**
+**Voice Quality**:
+- ✅ **Neural AI voices** - Natural, human-like sound
+- ✅ **No robotic sound** - Much better than traditional TTS engines
+- ✅ **Multiple options** - Choose from 20+ English US voices
+- ✅ **Offline capable** - Works offline after first download
 
-The default espeak engine can sound robotic. To improve voice quality:
-
-1. **Install MBROLA voices** (best quality):
-   ```bash
-   sudo apt-get install mbrola mbrola-us1 mbrola-us2 mbrola-us3
-   ```
-   The app will automatically prioritize MBROLA voices if available.
-
-2. **Install Festival voices** (good quality):
-   ```bash
-   sudo apt-get install festival festvox-kallpc16k festvox-rablpc16k
-   ```
-   The app will automatically prioritize Festival voices if available.
-
-3. **The app automatically optimizes voice settings:**
-   - Sets volume to 90% for clarity
-   - Adjusts pitch to 40 for more natural sound
-   - Prioritizes higher-quality voices in the dropdown
-   - Adds word spacing for better enunciation
-
-4. **Select a better voice from the dropdown:**
-   - MBROLA voices (if installed) will appear first
-   - Festival voices will appear next
-   - Standard espeak voices will appear last
-
-**Available Voices**: Depends on installed TTS backends:
-- `espeak`: Multiple language voices
-- `festival`: Additional voices (if installed)
+**First Use**:
+- On first run, Edge TTS downloads voice models (one-time, ~5-10MB per voice)
+- Requires internet connection for initial download
+- After download, voices are cached locally and work offline
+- Cache location: `~/.cache/edge-tts/`
 
 ### 3. Selected Text Capture
 
@@ -218,14 +210,46 @@ else:
 ### No Sound Output
 
 ```bash
-# Check if espeak is installed
-espeak "test"
+# Check if audio player is installed
+which paplay
+which mpg123
+
+# Install audio player if missing
+sudo apt-get install pulseaudio-utils mpg123
+
+# Test audio system
+paplay /usr/share/sounds/alsa/Front_Left.wav
 
 # Check audio system
 aplay /usr/share/sounds/alsa/Front_Left.wav
 
 # Install missing packages
 sudo apt-get install alsa-utils pulseaudio
+```
+
+### Edge TTS Not Working
+
+```bash
+# Check if edge-tts is installed
+pip show edge-tts
+
+# Reinstall if needed
+pip install --upgrade edge-tts
+
+# Test Edge TTS directly
+python3 -c "import edge_tts; print('Edge TTS installed successfully')"
+```
+
+### No Voices in Dropdown
+
+```bash
+# Check internet connection (required for first voice fetch)
+ping -c 3 google.com
+
+# Check Edge TTS can fetch voices
+python3 -c "import asyncio; import edge_tts; asyncio.run(edge_tts.list_voices())"
+
+# If voices don't load, check firewall/proxy settings
 ```
 
 ### PyQt6 Import Errors
@@ -238,17 +262,32 @@ sudo apt-get install python3-pyqt6 python3-pyqt6.qtmultimedia
 pip install --upgrade --force-reinstall PyQt6
 ```
 
-### No Voices Available
+### Voice Download Issues
 
 ```bash
-# Check espeak voices
-espeak --voices
+# Check cache directory
+ls -la ~/.cache/edge-tts/
 
-# Install additional voices
-sudo apt-get install festival festvox-kallpc16k
+# Clear cache if corrupted (will re-download on next use)
+rm -rf ~/.cache/edge-tts/
+
+# Check disk space
+df -h ~/.cache/
 ```
 
 ## Summary
 
-**The app will work on Kali Linux** for basic text-to-speech functionality, but the global hotkey feature needs code updates to work properly. The core TTS, GUI, and playback features should work after installing `espeak` and Python dependencies.
+**The app will work on Kali Linux** with Edge TTS! 
+
+**Requirements:**
+- ✅ Python 3.8+ (usually pre-installed on Kali)
+- ✅ Internet connection (for first voice download only)
+- ✅ Audio player (paplay, mpg123, or similar)
+- ✅ Edge TTS Python package (installed via requirements.txt)
+
+**Benefits of Edge TTS on Linux:**
+- 🎯 **High-quality neural voices** - Much better than espeak/festival
+- 🚀 **Easy setup** - No system TTS engine installation needed
+- 🌐 **Offline capable** - Works offline after first download
+- 🎨 **Many voice options** - 20+ English US voices to choose from
 
