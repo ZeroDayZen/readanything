@@ -375,10 +375,15 @@ class TextToSpeechThread(QThread):
             temp_path = temp_file.name
             temp_file.close()
             
-            # Run async function in sync context
+            # Run async function in sync context - use stream for faster generation
             async def generate_speech():
                 communicate = edge_tts.Communicate(text=self.text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                await communicate.save(temp_path)
+                
+                # Use streaming for faster processing (writes chunks as they arrive)
+                with open(temp_path, 'wb') as f:
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            f.write(chunk["data"])
             
             # Create new event loop for this thread
             loop = asyncio.new_event_loop()
@@ -459,7 +464,7 @@ class TextToSpeechThread(QThread):
                 if self._process.poll() is None:
                     self._process.wait()
         finally:
-            # Clean up temp file
+            # Clean up temp file after playback completes
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.unlink(temp_path)
