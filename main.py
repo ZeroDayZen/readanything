@@ -4,6 +4,10 @@ ReadAnything - A minimalistic text-to-speech application
 Supports text input, PDF, and Word documents
 """
 
+# Application version - update this for each release
+VERSION = "1.0.1"
+VERSION_NAME = "1.0.1"  # Display name (can include beta, alpha, etc.)
+
 import sys
 import os
 import platform
@@ -193,9 +197,44 @@ class TextToSpeechThread(QThread):
         if not self.engine:
             raise Exception("TTS engine not initialized")
         
+        # Configure engine properties for better voice quality on Linux
         self.engine.setProperty('rate', self.rate)
+        
+        # On Linux, optimize voice settings for clearer speech
+        if platform.system() != 'Darwin':
+            try:
+                # Set volume for clarity (if not already set)
+                try:
+                    current_volume = self.engine.getProperty('volume')
+                    if current_volume is None or current_volume < 0.8:
+                        self.engine.setProperty('volume', 0.9)
+                except:
+                    pass
+                
+                # Set pitch for more natural sound (lower = more natural)
+                try:
+                    self.engine.setProperty('pitch', 40)  # Lower pitch for clarity
+                except:
+                    pass
+            except:
+                pass  # Continue if property setting fails
+        
         if self.voice_id:
             self.engine.setProperty('voice', self.voice_id)
+        else:
+            # On Linux, try to select a better default voice if available
+            if platform.system() != 'Darwin' and self.voices:
+                try:
+                    # Prefer voices with "mb" (mbrola) or "f" (festival) in name for better quality
+                    # Also prefer voices with "en" or "english" for English
+                    better_voices = [v for v in self.voices if 
+                                   any(keyword in v.name.lower() or keyword in str(v.id).lower() 
+                                       for keyword in ['mb', 'mbrola', 'f', 'festival', 'en', 'english'])]
+                    if better_voices:
+                        # Use the first better voice found
+                        self.engine.setProperty('voice', better_voices[0].id)
+                except:
+                    pass  # Continue with default if selection fails
         
         # Say the text
         self.engine.say(self.text)
@@ -359,6 +398,36 @@ class ReadAnythingApp(QMainWindow):
         """Initialize text-to-speech engine"""
         try:
             self.engine = pyttsx3.init()
+            
+            # On Linux, configure espeak for better voice quality
+            if platform.system() != 'Darwin':
+                try:
+                    # Set better default properties for clearer speech
+                    # Pitch: 50 is default, higher values = higher pitch
+                    # Volume: 0.0 to 1.0, 0.8-0.9 is good for clarity
+                    # Word gap: milliseconds between words (50-100ms for better clarity)
+                    
+                    # Try to set volume for better clarity (if supported)
+                    try:
+                        self.engine.setProperty('volume', 0.9)  # 90% volume for clarity
+                    except:
+                        pass
+                    
+                    # Try to set pitch for more natural sound (if supported)
+                    # Lower pitch (30-40) often sounds more natural than default (50)
+                    try:
+                        # Get current pitch if available
+                        current_pitch = self.engine.getProperty('pitch')
+                        if current_pitch is not None:
+                            # Set to a more natural pitch (lower = more natural)
+                            self.engine.setProperty('pitch', 40)
+                    except:
+                        pass
+                    
+                except Exception as e:
+                    # If setting properties fails, continue anyway
+                    print(f"Note: Could not set all voice properties: {e}", file=sys.stderr)
+            
             voices = self.engine.getProperty('voices')
             # Ensure voices is always a list, even if getProperty returns None
             self.voices = voices if voices is not None else []
@@ -370,7 +439,7 @@ class ReadAnythingApp(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("ReadAnything")
+        self.setWindowTitle(f"ReadAnything v{VERSION_NAME}")
         self.setGeometry(100, 100, 800, 600)
         
         # Set window icon
@@ -394,6 +463,16 @@ class ReadAnythingApp(QMainWindow):
         title.setFont(title_font)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
+        
+        # Version label
+        version_label = QLabel(f"Version {VERSION_NAME}")
+        version_font = QFont()
+        version_font.setPointSize(10)
+        version_font.setItalic(True)
+        version_label.setFont(version_font)
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version_label.setStyleSheet("color: #666666;")
+        layout.addWidget(version_label)
         
         # Text input area
         text_label = QLabel("Enter text:")
@@ -494,8 +573,8 @@ class ReadAnythingApp(QMainWindow):
         
         layout.addLayout(button_layout)
         
-        # Status bar
-        self.statusBar().showMessage("Ready")
+        # Status bar - show version on startup
+        self.statusBar().showMessage(f"Ready - ReadAnything v{VERSION_NAME}")
     
     def set_window_icon(self):
         """Set the window icon"""
@@ -516,9 +595,9 @@ class ReadAnythingApp(QMainWindow):
     
     def show_about(self):
         """Show About dialog with usage instructions"""
-        about_text = """
+        about_text = f"""
 <h2>ReadAnything</h2>
-<p><b>Version 1.0-beta</b></p>
+<p><b>Version {VERSION_NAME}</b></p>
 <p>A minimalistic text-to-speech application for macOS and Linux.</p>
 
 <h3>How to Use</h3>
@@ -797,19 +876,59 @@ class ReadAnythingApp(QMainWindow):
                 if self.voice_combo.count() == 0:
                     self.voice_combo.addItem("Default", None)
         else:
-            # Use pyttsx3 voices for non-macOS
+            # Use pyttsx3 voices for non-macOS (Linux)
             if self.engine and self.voices:
                 try:
                     # Ensure voices is iterable (not None)
                     if self.voices is not None:
-                        for i, voice in enumerate(self.voices):
+                        # Sort voices to prioritize better quality ones
+                        # mbrola and festival voices are generally better quality
+                        voice_items = []
+                        for voice in self.voices:
                             try:
                                 name = voice.name if hasattr(voice, 'name') else str(voice)
                                 voice_id = voice.id if hasattr(voice, 'id') else None
+                                
+                                if not name or not voice_id:
+                                    continue
+                                
+                                # Score voices: higher score = better quality
+                                score = 0
+                                name_lower = name.lower()
+                                id_lower = str(voice_id).lower()
+                                
+                                # Prefer mbrola voices (best quality)
+                                if 'mb' in name_lower or 'mbrola' in name_lower or 'mb' in id_lower:
+                                    score += 100
+                                # Prefer festival voices (good quality)
+                                elif 'f' in name_lower or 'festival' in name_lower or 'f' in id_lower:
+                                    score += 50
+                                # Prefer English voices
+                                if 'en' in name_lower or 'english' in name_lower or 'en' in id_lower:
+                                    score += 25
+                                # Prefer female voices (often clearer)
+                                if any(female in name_lower for female in ['female', 'f', 'woman', 'woman']):
+                                    score += 10
+                                
+                                voice_items.append((score, name, voice_id))
+                            except Exception as e:
+                                print(f"Error processing voice: {e}", file=sys.stderr)
+                                continue
+                        
+                        # Sort by score (highest first), then by name
+                        voice_items.sort(key=lambda x: (-x[0], x[1]))
+                        
+                        # Add voices to combo box
+                        for score, name, voice_id in voice_items:
+                            try:
                                 self.voice_combo.addItem(name, voice_id)
                             except Exception as e:
                                 print(f"Error adding voice: {e}", file=sys.stderr)
                                 continue
+                        
+                        # If no voices were added, add default
+                        if self.voice_combo.count() == 0:
+                            self.voice_combo.addItem("Default", None)
                     else:
                         self.voice_combo.addItem("Default", None)
                 except Exception as e:

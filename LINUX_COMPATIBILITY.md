@@ -68,11 +68,38 @@ python3 main.py
 
 **Temporary Solution**: Use the app manually - paste text and click Play
 
-### 2. Voice Selection
+### 2. Voice Selection and Quality
 
 **Current Issue**: Voice detection uses macOS `say` command
 
 **Workaround**: The app falls back to `pyttsx3` voice detection, which should work but may show fewer voices than macOS
+
+**Improving Voice Quality on Linux:**
+
+The default espeak engine can sound robotic. To improve voice quality:
+
+1. **Install MBROLA voices** (best quality):
+   ```bash
+   sudo apt-get install mbrola mbrola-us1 mbrola-us2 mbrola-us3
+   ```
+   The app will automatically prioritize MBROLA voices if available.
+
+2. **Install Festival voices** (good quality):
+   ```bash
+   sudo apt-get install festival festvox-kallpc16k festvox-rablpc16k
+   ```
+   The app will automatically prioritize Festival voices if available.
+
+3. **The app automatically optimizes voice settings:**
+   - Sets volume to 90% for clarity
+   - Adjusts pitch to 40 for more natural sound
+   - Prioritizes higher-quality voices in the dropdown
+   - Adds word spacing for better enunciation
+
+4. **Select a better voice from the dropdown:**
+   - MBROLA voices (if installed) will appear first
+   - Festival voices will appear next
+   - Standard espeak voices will appear last
 
 **Available Voices**: Depends on installed TTS backends:
 - `espeak`: Multiple language voices
