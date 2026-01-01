@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.0.3"
-VERSION_NAME = "1.0.3"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.0.4"
+VERSION_NAME = "1.0.4"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -258,6 +258,9 @@ class TextToSpeechThread(QThread):
                     if iterate_result is None:
                         # iterate() returned None - this shouldn't happen normally
                         # but can occur on some systems. Use time estimation as fallback.
+                        if not self._is_running:
+                            break  # Exit immediately if stop was called
+                        
                         chars_per_second = max(5, self.rate / 12.0)
                         estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
                         estimated_ms = max(500, min(estimated_ms, 30000))
@@ -268,6 +271,8 @@ class TextToSpeechThread(QThread):
                         while waited < estimated_ms and self._is_running:
                             self.msleep(100)
                             waited += 100
+                            if not self._is_running:
+                                break  # Exit immediately if stop was called
                         break
                     
                     # Iterate over the generator once (processes one event loop iteration)
@@ -288,11 +293,16 @@ class TextToSpeechThread(QThread):
                                 # Speech appears complete, but wait a bit more to ensure
                                 # the last word is fully enunciated (Linux engines need extra time)
                                 # Wait a short delay to allow final word to complete
-                                self.msleep(200)  # 200ms delay for last word
+                                # Skip delay if stop was called
+                                if self._is_running:
+                                    self.msleep(200)  # 200ms delay for last word
                                 
-                                # Double-check that it's still not busy
-                                if not self.engine._proxy.isBusy():
+                                # Double-check that it's still not busy (and not stopped)
+                                if not self.engine._proxy.isBusy() and self._is_running:
                                     speech_complete = True
+                                elif not self._is_running:
+                                    # Stop was called, exit immediately
+                                    break
                     except:
                         # Can't check busy state, continue iterating
                         pass
@@ -300,7 +310,9 @@ class TextToSpeechThread(QThread):
                     if speech_complete:
                         # Additional delay to ensure last word is fully spoken
                         # This helps with Linux TTS engines that cut off early
-                        self.msleep(300)  # Extra 300ms for final enunciation
+                        # Skip delay if stop was called
+                        if self._is_running:
+                            self.msleep(300)  # Extra 300ms for final enunciation
                         break
                     
                     iteration_count += 1
@@ -311,6 +323,9 @@ class TextToSpeechThread(QThread):
                     # Handle "'NoneType' object is not iterable"
                     if "'NoneType' object is not iterable" in str(e) or "not iterable" in str(e):
                         # iterate() may have returned None, use time estimation
+                        if not self._is_running:
+                            break  # Exit immediately if stop was called
+                        
                         chars_per_second = max(5, self.rate / 12.0)
                         estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
                         estimated_ms = max(500, min(estimated_ms, 30000))
@@ -321,6 +336,8 @@ class TextToSpeechThread(QThread):
                         while waited < estimated_ms and self._is_running:
                             self.msleep(100)
                             waited += 100
+                            if not self._is_running:
+                                break  # Exit immediately if stop was called
                         break
                     else:
                         # Different TypeError, re-raise
@@ -331,7 +348,9 @@ class TextToSpeechThread(QThread):
             
             # Give the engine a moment to finish any remaining audio buffer
             # This helps prevent cutting off the last word on Linux
-            self.msleep(500)  # 500ms buffer for final audio to play
+            # Skip delays if stop was called - user wants immediate stop
+            if self._is_running:
+                self.msleep(500)  # 500ms buffer for final audio to play
             
             # Only end loop if we started it and engine exists
             if loop_started and self.engine:
@@ -343,7 +362,9 @@ class TextToSpeechThread(QThread):
             
             # Final delay after ending loop to ensure audio completes
             # Linux TTS engines may need this extra time for proper enunciation
-            self.msleep(300)
+            # Skip delay if stop was called
+            if self._is_running:
+                self.msleep(300)
         except Exception as e:
             # Only end loop if we started it and engine exists
             if loop_started and self.engine:
@@ -375,14 +396,25 @@ class TextToSpeechThread(QThread):
     
     def stop(self):
         self._is_running = False
-        # Stop subprocess if running
+        # Stop subprocess if running (immediate termination)
         if self._process and self._process.poll() is None:
             try:
                 self._process.terminate()
+                # Wait briefly for termination, then kill if needed
+                try:
+                    self._process.wait(timeout=0.1)
+                except:
+                    self._process.kill()
             except:
                 pass
-        # Clean up engine
-        self._cleanup_engine()
+        # Stop engine immediately
+        if self.engine:
+            try:
+                self.engine.stop()
+            except:
+                pass
+        # Don't call _cleanup_engine here - it will be called in finally block
+        # This allows the thread to exit quickly
 
 
 class ReadAnythingApp(QMainWindow):
@@ -1129,15 +1161,21 @@ class ReadAnythingApp(QMainWindow):
     
     def stop_text(self):
         """Stop the text-to-speech"""
-        # Stop highlighting
+        # Stop highlighting immediately
         self.stop_highlighting()
         
+        # Stop the thread immediately
         if self.tts_thread and self.tts_thread.isRunning():
             self.tts_thread.stop()
-            self.tts_thread.wait()
+            # Wait with timeout to avoid hanging
+            self.tts_thread.wait(100)  # Wait max 100ms for thread to stop
         
+        # Also stop the main engine if it exists (for redundancy)
         if self.engine:
-            self.engine.stop()
+            try:
+                self.engine.stop()
+            except:
+                pass
         
         self.play_btn.setEnabled(True)
         self.statusBar().showMessage("Stopped")
