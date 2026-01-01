@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.0.4"
-VERSION_NAME = "1.0.4"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.0.5"
+VERSION_NAME = "1.0.5"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -228,153 +228,74 @@ class TextToSpeechThread(QThread):
         # Say the text
         self.engine.say(self.text)
         
-        # Use startLoop() and iterate() to avoid event loop conflicts
-        # iterate() must be called repeatedly in a loop to process the event queue
-        loop_started = False
+        # Use a simpler approach: run in a separate thread with periodic checks
+        # This avoids the choppy iterate() loop while allowing immediate stop
         try:
-            # Check if loop is already started before starting
-            # pyttsx3 doesn't provide a direct way to check, so we wrap in try/except
+            # Use startLoop() with iterate() but check _is_running frequently
+            # and use longer delays to reduce choppiness
+            loop_started = False
             try:
                 self.engine.startLoop(False)
                 loop_started = True
             except RuntimeError as e:
                 # If loop is already started, we can continue
                 if 'already started' in str(e).lower():
-                    loop_started = True  # Consider it started if error says so
+                    loop_started = True
                 else:
-                    raise  # Re-raise if it's a different RuntimeError
+                    raise
             
-            # Keep calling iterate() in a loop until speech completes
-            # iterate() returns a generator that yields once per call
-            # We need to call it repeatedly to process the event queue
-            max_iterations = 10000  # Safety limit to prevent infinite loops
-            iteration_count = 0
+            # Simplified iteration: check less frequently to reduce choppiness
+            # Check busy state periodically instead of every 10ms
+            max_checks = 1000  # Maximum number of busy checks (prevents infinite loop)
+            check_count = 0
+            check_interval = 50  # Check every 50ms instead of 10ms for smoother playback
             
-            while self._is_running and iteration_count < max_iterations:
+            while self._is_running and check_count < max_checks:
+                # Check if engine is busy (speech in progress)
+                is_busy = True
                 try:
-                    # Call iterate() to get the generator for this iteration
-                    iterate_result = self.engine.iterate()
-                    
-                    if iterate_result is None:
-                        # iterate() returned None - this shouldn't happen normally
-                        # but can occur on some systems. Use time estimation as fallback.
-                        if not self._is_running:
-                            break  # Exit immediately if stop was called
-                        
-                        chars_per_second = max(5, self.rate / 12.0)
-                        estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
-                        estimated_ms = max(500, min(estimated_ms, 30000))
-                        # Add buffer time to ensure last word is fully spoken (Linux TTS needs this)
-                        estimated_ms += 800  # Extra 800ms buffer for final word enunciation
-                        
-                        waited = 0
-                        while waited < estimated_ms and self._is_running:
-                            self.msleep(100)
-                            waited += 100
-                            if not self._is_running:
-                                break  # Exit immediately if stop was called
-                        break
-                    
-                    # Iterate over the generator once (processes one event loop iteration)
-                    try:
-                        for _ in iterate_result:
-                            # Process one iteration - the generator yields once
-                            pass
-                    except StopIteration:
-                        # Generator exhausted for this iteration
-                        pass
-                    
-                    # Check if engine is still busy (speech in progress)
-                    # Use internal API carefully - only if available
-                    speech_complete = False
-                    try:
-                        if hasattr(self.engine, '_proxy') and hasattr(self.engine._proxy, 'isBusy'):
-                            if not self.engine._proxy.isBusy():
-                                # Speech appears complete, but wait a bit more to ensure
-                                # the last word is fully enunciated (Linux engines need extra time)
-                                # Wait a short delay to allow final word to complete
-                                # Skip delay if stop was called
-                                if self._is_running:
-                                    self.msleep(200)  # 200ms delay for last word
-                                
-                                # Double-check that it's still not busy (and not stopped)
-                                if not self.engine._proxy.isBusy() and self._is_running:
-                                    speech_complete = True
-                                elif not self._is_running:
-                                    # Stop was called, exit immediately
-                                    break
-                    except:
-                        # Can't check busy state, continue iterating
-                        pass
-                    
-                    if speech_complete:
-                        # Additional delay to ensure last word is fully spoken
-                        # This helps with Linux TTS engines that cut off early
-                        # Skip delay if stop was called
-                        if self._is_running:
-                            self.msleep(300)  # Extra 300ms for final enunciation
-                        break
-                    
-                    iteration_count += 1
-                    # Small delay between iterations
-                    self.msleep(10)
-                    
-                except TypeError as e:
-                    # Handle "'NoneType' object is not iterable"
-                    if "'NoneType' object is not iterable" in str(e) or "not iterable" in str(e):
-                        # iterate() may have returned None, use time estimation
-                        if not self._is_running:
-                            break  # Exit immediately if stop was called
-                        
-                        chars_per_second = max(5, self.rate / 12.0)
-                        estimated_ms = int((len(self.text) / chars_per_second) * 1000) if chars_per_second > 0 else 2000
-                        estimated_ms = max(500, min(estimated_ms, 30000))
-                        # Add buffer time to ensure last word is fully spoken (Linux TTS needs this)
-                        estimated_ms += 800  # Extra 800ms buffer for final word enunciation
-                        
-                        waited = 0
-                        while waited < estimated_ms and self._is_running:
-                            self.msleep(100)
-                            waited += 100
-                            if not self._is_running:
-                                break  # Exit immediately if stop was called
-                        break
+                    if hasattr(self.engine, '_proxy') and hasattr(self.engine._proxy, 'isBusy'):
+                        is_busy = self.engine._proxy.isBusy()
                     else:
-                        # Different TypeError, re-raise
-                        raise
-                except StopIteration:
-                    # Outer StopIteration - should not happen but handle gracefully
+                        # If we can't check busy state, use iterate() as fallback
+                        try:
+                            iterate_result = self.engine.iterate()
+                            if iterate_result is not None:
+                                # Consume the iterator
+                                list(iterate_result)
+                        except:
+                            pass
+                except:
+                    pass
+                
+                # If not busy, speech is complete
+                if not is_busy:
+                    if self._is_running:
+                        # Add small buffer for final word (only if not stopped)
+                        self.msleep(300)
                     break
+                
+                # Wait before next check (longer interval reduces choppiness)
+                check_count += 1
+                for _ in range(check_interval // 10):
+                    if not self._is_running:
+                        break  # Exit immediately if stopped
+                    self.msleep(10)
             
-            # Give the engine a moment to finish any remaining audio buffer
-            # This helps prevent cutting off the last word on Linux
-            # Skip delays if stop was called - user wants immediate stop
-            if self._is_running:
-                self.msleep(500)  # 500ms buffer for final audio to play
-            
-            # Only end loop if we started it and engine exists
+            # End the loop if we started it
             if loop_started and self.engine:
                 try:
                     self.engine.endLoop()
-                except Exception as end_error:
-                    # Ignore errors when ending loop (it may already be ended)
-                    print(f"Note: Error ending loop (may already be ended): {end_error}", file=sys.stderr)
+                except:
+                    pass  # Ignore errors when ending loop
             
-            # Final delay after ending loop to ensure audio completes
-            # Linux TTS engines may need this extra time for proper enunciation
-            # Skip delay if stop was called
-            if self._is_running:
-                self.msleep(300)
         except Exception as e:
-            # Only end loop if we started it and engine exists
+            # End loop on error
             if loop_started and self.engine:
                 try:
                     self.engine.endLoop()
-                except Exception as end_error:
-                    # Ignore errors when ending loop
-                    print(f"Note: Error ending loop during exception handling: {end_error}", file=sys.stderr)
-            # Also add delay in error case to allow cleanup
-            self.msleep(200)
+                except:
+                    pass
             raise e
     
     def _cleanup_engine(self):
@@ -402,15 +323,24 @@ class TextToSpeechThread(QThread):
                 self._process.terminate()
                 # Wait briefly for termination, then kill if needed
                 try:
-                    self._process.wait(timeout=0.1)
+                    self._process.wait(timeout=0.05)  # Shorter timeout
                 except:
-                    self._process.kill()
+                    try:
+                        self._process.kill()
+                    except:
+                        pass
             except:
                 pass
-        # Stop engine immediately
+        # Stop engine immediately - this is critical for immediate stop
         if self.engine:
             try:
+                # Stop the engine first
                 self.engine.stop()
+                # Also try to end the loop if it's running
+                try:
+                    self.engine.endLoop()
+                except:
+                    pass
             except:
                 pass
         # Don't call _cleanup_engine here - it will be called in finally block
