@@ -824,59 +824,87 @@ class ReadAnythingApp(QMainWindow):
                             except:
                                 pass  # Skip this voice if it still fails
                     
+                    # Set first voice (best English US voice) as default
+                    if self.voice_combo.count() > 0:
+                        self.voice_combo.setCurrentIndex(0)
+                    
                     # If no voices found, try a simpler fallback approach
                     if self.voice_combo.count() == 0:
-                        # Fallback: try to add common voices directly
-                        fallback_voices = ['Samantha', 'Fred', 'Kathy', 'Ralph', 'Alex', 'Victoria']
+                        # Fallback: try to add common US English voices directly
+                        fallback_voices = ['Alex', 'Samantha', 'Victoria', 'Fred', 'Kathy', 'Ralph']
                         for voice in fallback_voices:
                             try:
-                                # Test if voice exists by trying to use it (quick test)
+                                # Test if voice exists and is en_US by checking say command
                                 test_result = subprocess.run(
-                                    ['say', '-v', voice, 'test'],
+                                    ['say', '-v', voice, '-v', '?'],
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE,
                                     timeout=1
                                 )
-                                # If command succeeds, voice exists
-                                if test_result.returncode == 0 or 'test' in str(test_result.stderr):
+                                # Check if voice exists and is en_US
+                                if test_result.returncode == 0 and 'en_US' in test_result.stdout:
                                     self.voice_combo.addItem(voice, voice)
                                     if self.voice_combo.count() >= 3:  # Stop after finding a few
                                         break
                             except:
                                 continue
                         
+                        # Set first voice as default if any were added
+                        if self.voice_combo.count() > 0:
+                            self.voice_combo.setCurrentIndex(0)
+                        
                         # If still no voices, add default
                         if self.voice_combo.count() == 0:
                             self.voice_combo.addItem("Default", None)
                 else:
-                    # If say command failed, try fallback
-                    fallback_voices = ['Samantha', 'Fred', 'Kathy', 'Ralph']
+                    # If say command failed, try fallback with en_US check
+                    fallback_voices = ['Alex', 'Samantha', 'Victoria', 'Fred', 'Kathy', 'Ralph']
                     for voice in fallback_voices:
                         try:
+                            # Check if voice is en_US
                             test_result = subprocess.run(
-                                ['say', '-v', voice, 'test'],
+                                ['say', '-v', voice, '-v', '?'],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
                                 timeout=1
                             )
-                            if test_result.returncode == 0 or 'test' in str(test_result.stderr):
+                            if test_result.returncode == 0 and 'en_US' in test_result.stdout:
                                 self.voice_combo.addItem(voice, voice)
                         except:
                             continue
+                    
+                    # Set first voice as default if any were added
+                    if self.voice_combo.count() > 0:
+                        self.voice_combo.setCurrentIndex(0)
+                    
                     if self.voice_combo.count() == 0:
                         self.voice_combo.addItem("Default", None)
             except Exception as e:
-                # On any error, try to add at least some common voices
-                fallback_voices = ['Samantha', 'Fred', 'Kathy', 'Ralph']
+                # On any error, try to add at least some common US English voices
+                fallback_voices = ['Alex', 'Samantha', 'Victoria', 'Fred', 'Kathy', 'Ralph']
                 for voice in fallback_voices:
                     try:
-                        self.voice_combo.addItem(voice, voice)
+                        # Verify it's en_US before adding
+                        test_result = subprocess.run(
+                            ['say', '-v', voice, '-v', '?'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=1
+                        )
+                        if test_result.returncode == 0 and 'en_US' in test_result.stdout:
+                            self.voice_combo.addItem(voice, voice)
                     except:
                         continue
+                
+                # Set first voice as default if any were added
+                if self.voice_combo.count() > 0:
+                    self.voice_combo.setCurrentIndex(0)
+                
                 if self.voice_combo.count() == 0:
                     self.voice_combo.addItem("Default", None)
         else:
             # Use pyttsx3 voices for non-macOS (Linux)
+            # Filter to only English US voices
             if self.engine and self.voices:
                 try:
                     # Ensure voices is iterable (not None)
@@ -892,10 +920,36 @@ class ReadAnythingApp(QMainWindow):
                                 if not name or not voice_id:
                                     continue
                                 
-                                # Score voices: higher score = better quality
-                                score = 0
+                                # Filter: Only include English voices
+                                # Check language property if available
+                                is_english = False
                                 name_lower = name.lower()
                                 id_lower = str(voice_id).lower()
+                                
+                                # Check if voice has language property
+                                if hasattr(voice, 'languages') and voice.languages:
+                                    # Check if any language is English
+                                    for lang in voice.languages:
+                                        if isinstance(lang, str):
+                                            lang_lower = lang.lower()
+                                            # Accept en, en-us, en_us, english, etc.
+                                            if lang_lower.startswith('en') or 'english' in lang_lower:
+                                                # Prefer US English (en-us, en_us, en-us)
+                                                if 'us' in lang_lower or lang_lower == 'en' or lang_lower.startswith('en-'):
+                                                    is_english = True
+                                                    break
+                                else:
+                                    # If no language property, check name/ID for English indicators
+                                    english_indicators = ['en', 'english', 'us', 'american']
+                                    if any(indicator in name_lower or indicator in id_lower for indicator in english_indicators):
+                                        is_english = True
+                                
+                                # Skip non-English voices
+                                if not is_english:
+                                    continue
+                                
+                                # Score voices: higher score = better quality
+                                score = 0
                                 
                                 # Prefer mbrola voices (best quality)
                                 if 'mb' in name_lower or 'mbrola' in name_lower or 'mb' in id_lower:
@@ -903,11 +957,16 @@ class ReadAnythingApp(QMainWindow):
                                 # Prefer festival voices (good quality)
                                 elif 'f' in name_lower or 'festival' in name_lower or 'f' in id_lower:
                                     score += 50
-                                # Prefer English voices
-                                if 'en' in name_lower or 'english' in name_lower or 'en' in id_lower:
+                                
+                                # Prefer US English specifically
+                                if 'us' in name_lower or 'us' in id_lower or 'american' in name_lower:
+                                    score += 30
+                                # Prefer English voices (already checked above)
+                                elif 'en' in name_lower or 'english' in name_lower or 'en' in id_lower:
                                     score += 25
+                                
                                 # Prefer female voices (often clearer)
-                                if any(female in name_lower for female in ['female', 'f', 'woman', 'woman']):
+                                if any(female in name_lower for female in ['female', 'f', 'woman']):
                                     score += 10
                                 
                                 voice_items.append((score, name, voice_id))
@@ -925,6 +984,10 @@ class ReadAnythingApp(QMainWindow):
                             except Exception as e:
                                 print(f"Error adding voice: {e}", file=sys.stderr)
                                 continue
+                        
+                        # Set first voice (best English US voice) as default
+                        if self.voice_combo.count() > 0:
+                            self.voice_combo.setCurrentIndex(0)
                         
                         # If no voices were added, add default
                         if self.voice_combo.count() == 0:
