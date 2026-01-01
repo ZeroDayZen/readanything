@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.0.2"
-VERSION_NAME = "1.0.2"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.0.3"
+VERSION_NAME = "1.0.3"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -230,8 +230,19 @@ class TextToSpeechThread(QThread):
         
         # Use startLoop() and iterate() to avoid event loop conflicts
         # iterate() must be called repeatedly in a loop to process the event queue
+        loop_started = False
         try:
-            self.engine.startLoop(False)
+            # Check if loop is already started before starting
+            # pyttsx3 doesn't provide a direct way to check, so we wrap in try/except
+            try:
+                self.engine.startLoop(False)
+                loop_started = True
+            except RuntimeError as e:
+                # If loop is already started, we can continue
+                if 'already started' in str(e).lower():
+                    loop_started = True  # Consider it started if error says so
+                else:
+                    raise  # Re-raise if it's a different RuntimeError
             
             # Keep calling iterate() in a loop until speech completes
             # iterate() returns a generator that yields once per call
@@ -322,18 +333,27 @@ class TextToSpeechThread(QThread):
             # This helps prevent cutting off the last word on Linux
             self.msleep(500)  # 500ms buffer for final audio to play
             
-            self.engine.endLoop()
+            # Only end loop if we started it and engine exists
+            if loop_started and self.engine:
+                try:
+                    self.engine.endLoop()
+                except Exception as end_error:
+                    # Ignore errors when ending loop (it may already be ended)
+                    print(f"Note: Error ending loop (may already be ended): {end_error}", file=sys.stderr)
             
             # Final delay after ending loop to ensure audio completes
             # Linux TTS engines may need this extra time for proper enunciation
             self.msleep(300)
         except Exception as e:
-            try:
-                self.engine.endLoop()
-                # Also add delay in error case to allow cleanup
-                self.msleep(200)
-            except:
-                pass
+            # Only end loop if we started it and engine exists
+            if loop_started and self.engine:
+                try:
+                    self.engine.endLoop()
+                except Exception as end_error:
+                    # Ignore errors when ending loop
+                    print(f"Note: Error ending loop during exception handling: {end_error}", file=sys.stderr)
+            # Also add delay in error case to allow cleanup
+            self.msleep(200)
             raise e
     
     def _cleanup_engine(self):
