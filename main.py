@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.0.5"
-VERSION_NAME = "1.0.5"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.1.0"
+VERSION_NAME = "1.1.0"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -26,6 +26,13 @@ try:
     PYNPUT_AVAILABLE = True
 except ImportError:
     PYNPUT_AVAILABLE = False
+
+# Edge TTS (free local AI TTS from Microsoft - works offline after downloading voices)
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
 
 
 class GlobalHotkeyThread(QThread):
@@ -96,12 +103,13 @@ class TextToSpeechThread(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
     
-    def __init__(self, text, engine, rate, voice_id):
+    def __init__(self, text, engine, rate, voice_id, tts_engine_type='default'):
         super().__init__()
         self.text = text
         self.engine = engine
         self.rate = rate
         self.voice_id = voice_id
+        self.tts_engine_type = tts_engine_type  # 'default' or 'edge-tts'
         self._is_running = True
         self._process = None
         # Prevent thread from causing app to exit
@@ -121,6 +129,11 @@ class TextToSpeechThread(QThread):
     def run(self):
         try:
             if not self._is_running:
+                return
+            
+            # Use Edge TTS if specified (free local AI TTS)
+            if self.tts_engine_type == 'edge-tts' and EDGE_TTS_AVAILABLE:
+                self._run_edge_tts()
                 return
             
             # On macOS, use native 'say' command to avoid event loop conflicts
@@ -331,8 +344,8 @@ class TextToSpeechThread(QThread):
                         pass
             except:
                 pass
-        # Stop engine immediately - this is critical for immediate stop
-        if self.engine:
+        # Stop engine immediately - this is critical for immediate stop (for default engine only)
+        if self.engine and self.tts_engine_type == 'default':
             try:
                 # Stop the engine first
                 self.engine.stop()
@@ -345,6 +358,85 @@ class TextToSpeechThread(QThread):
                 pass
         # Don't call _cleanup_engine here - it will be called in finally block
         # This allows the thread to exit quickly
+    
+    def _run_edge_tts(self):
+        """Run TTS using Edge TTS (free local AI TTS from Microsoft - works offline after downloading voices)"""
+        if not EDGE_TTS_AVAILABLE:
+            raise Exception("Edge TTS library not available. Install with: pip install edge-tts")
+        
+        import tempfile
+        import asyncio
+        temp_path = None
+        
+        try:
+            # Edge TTS uses async API, so we need to run it in an event loop
+            # Create temporary file for audio output
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            # Run async function in sync context
+            async def generate_speech():
+                communicate = edge_tts.Communicate(text=self.text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                await communicate.save(temp_path)
+            
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(generate_speech())
+            finally:
+                loop.close()
+            
+            # Check if output file was created
+            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                raise Exception("Edge TTS did not generate audio output")
+            
+            # Play the audio file using platform-specific player
+            if platform.system() == 'Darwin':
+                # macOS
+                self._process = subprocess.Popen(['afplay', temp_path])
+            elif platform.system() == 'Linux':
+                # Linux - try multiple players
+                self._process = None
+                for player in ['paplay', 'aplay', 'mpg123', 'mpv']:
+                    try:
+                        self._process = subprocess.Popen([player, temp_path],
+                                                        stdout=subprocess.PIPE,
+                                                        stderr=subprocess.PIPE)
+                        break
+                    except FileNotFoundError:
+                        continue
+                if not self._process:
+                    raise Exception("No audio player found. Install: sudo apt-get install pulseaudio-utils mpg123")
+            else:
+                # Windows
+                self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
+            
+            # Wait for playback to complete
+            if self._process:
+                while self._process.poll() is None:
+                    if not self._is_running:
+                        self._process.terminate()
+                        try:
+                            self._process.wait(timeout=0.5)
+                        except:
+                            try:
+                                self._process.kill()
+                            except:
+                                pass
+                        break
+                    self.msleep(100)
+                
+                if self._process.poll() is None:
+                    self._process.wait()
+        finally:
+            # Clean up temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
 
 
 class ReadAnythingApp(QMainWindow):
@@ -459,6 +551,20 @@ class ReadAnythingApp(QMainWindow):
         # Controls section
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(10)
+        
+        # TTS Engine selection
+        engine_layout = QHBoxLayout()
+        engine_label = QLabel("TTS Engine:")
+        engine_label.setMinimumWidth(80)
+        engine_layout.addWidget(engine_label)
+        
+        self.tts_engine_combo = QComboBox()
+        self.tts_engine_combo.addItem("Default (System)", "default")
+        if EDGE_TTS_AVAILABLE:
+            self.tts_engine_combo.addItem("Edge TTS (AI - Free, Local)", "edge-tts")
+        self.tts_engine_combo.currentIndexChanged.connect(self.on_tts_engine_changed)
+        engine_layout.addWidget(self.tts_engine_combo)
+        controls_layout.addLayout(engine_layout)
         
         # Voice selection
         voice_layout = QHBoxLayout()
@@ -971,6 +1077,33 @@ class ReadAnythingApp(QMainWindow):
             else:
                 self.voice_combo.addItem("Default", None)
     
+    def on_tts_engine_changed(self):
+        """Handle TTS engine selection change"""
+        # Update voice options based on selected engine
+        current_engine = self.tts_engine_combo.currentData()
+        
+        # Clear and repopulate voices based on engine type
+        self.voice_combo.clear()
+        
+        if current_engine == 'edge-tts' and EDGE_TTS_AVAILABLE:
+            # Edge TTS voices - popular English US voices
+            edge_voices = [
+                ('Aria (Neural)', 'en-US-AriaNeural'),
+                ('Jenny (Neural)', 'en-US-JennyNeural'),
+                ('Guy (Neural)', 'en-US-GuyNeural'),
+                ('Jane (Neural)', 'en-US-JaneNeural'),
+                ('Jason (Neural)', 'en-US-JasonNeural'),
+                ('Nancy (Neural)', 'en-US-NancyNeural'),
+                ('Tony (Neural)', 'en-US-TonyNeural'),
+            ]
+            for name, voice_id in edge_voices:
+                self.voice_combo.addItem(name, voice_id)
+            if self.voice_combo.count() > 0:
+                self.voice_combo.setCurrentIndex(0)
+        else:
+            # Default engine - use existing voice population
+            self.populate_voices()
+    
     def update_speed_label(self, value):
         """Update speed label when slider changes"""
         self.speed_label.setText(str(value))
@@ -978,7 +1111,11 @@ class ReadAnythingApp(QMainWindow):
     def play_text(self):
         """Play the text using text-to-speech"""
         try:
-            if not self.engine:
+            # Get TTS engine type first
+            tts_engine_type = self.tts_engine_combo.currentData() if hasattr(self, 'tts_engine_combo') else 'default'
+            
+            # Only check engine for default type
+            if tts_engine_type == 'default' and not self.engine:
                 QMessageBox.warning(self, "Error", "Text-to-speech engine not available")
                 return
             
@@ -991,42 +1128,52 @@ class ReadAnythingApp(QMainWindow):
             if self.tts_thread and self.tts_thread.isRunning():
                 self.stop_text()
             
-            # Get selected voice and speed
+            # Get selected voice, speed, and TTS engine type
             voice_id = self.voice_combo.currentData()
             speed = self.speed_slider.value()
+            tts_engine_type = self.tts_engine_combo.currentData()
             
-            # Create new engine instance for this thread
+            # Create new engine instance for this thread (only for default engine)
             # We create it in the main thread to avoid issues
             engine = None
-            try:
-                # Protect against any exceptions during engine creation
-                engine = pyttsx3.init()
-                if not engine:
-                    raise Exception("Failed to initialize TTS engine")
-            except SystemExit as e:
-                # Prevent SystemExit from closing the app
-                print(f"Prevented SystemExit during engine creation: {e.code}", file=sys.stderr)
-                self.play_btn.setEnabled(True)
-                self.statusBar().showMessage("Error: Engine creation failed")
-                return
-            except Exception as engine_error:
-                # Re-enable play button on error
-                self.play_btn.setEnabled(True)
-                self.statusBar().showMessage("Error initializing TTS engine")
-                error_msg = str(engine_error)
-                print(f"Error initializing TTS engine: {error_msg}", file=sys.stderr)
-                import traceback
-                traceback.print_exc()
+            if tts_engine_type == 'default':
                 try:
-                    QMessageBox.critical(self, "Error", f"Failed to initialize TTS engine: {error_msg}")
-                except:
-                    print(f"Could not show error dialog: {error_msg}", file=sys.stderr)
-                return  # Exit early if engine creation fails
+                    # Protect against any exceptions during engine creation
+                    engine = pyttsx3.init()
+                    if not engine:
+                        raise Exception("Failed to initialize TTS engine")
+                except SystemExit as e:
+                    # Prevent SystemExit from closing the app
+                    print(f"Prevented SystemExit during engine creation: {e.code}", file=sys.stderr)
+                    self.play_btn.setEnabled(True)
+                    self.statusBar().showMessage("Error: Engine creation failed")
+                    return
+                except Exception as engine_error:
+                    # Re-enable play button on error
+                    self.play_btn.setEnabled(True)
+                    self.statusBar().showMessage("Error initializing TTS engine")
+                    error_msg = str(engine_error)
+                    print(f"Error initializing TTS engine: {error_msg}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                    try:
+                        QMessageBox.critical(self, "Error", f"Failed to initialize TTS engine: {error_msg}")
+                    except:
+                        print(f"Could not show error dialog: {error_msg}", file=sys.stderr)
+                    return  # Exit early if engine creation fails
+            
+            # Check if Edge TTS is available for edge-tts engine
+            if tts_engine_type == 'edge-tts':
+                if not EDGE_TTS_AVAILABLE:
+                    QMessageBox.warning(self, "Edge TTS Not Available", 
+                                      "Edge TTS library is not installed.\n\n"
+                                      "Install with: pip install edge-tts")
+                    return
             
             # Create and start thread
             try:
-                # Create thread object
-                self.tts_thread = TextToSpeechThread(text, engine, speed, voice_id)
+                # Create thread object with TTS engine type
+                self.tts_thread = TextToSpeechThread(text, engine, speed, voice_id, tts_engine_type)
                 
                 # Connect signals BEFORE starting thread
                 self.tts_thread.finished.connect(self.on_speech_finished)
