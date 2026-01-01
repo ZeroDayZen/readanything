@@ -397,18 +397,46 @@ class TextToSpeechThread(QThread):
                 # macOS
                 self._process = subprocess.Popen(['afplay', temp_path])
             elif platform.system() == 'Linux':
-                # Linux - try multiple players
+                # Linux - try multiple players (prioritize MP3-capable players)
+                # Note: paplay and aplay don't support MP3, so prioritize mpg123 and mpv
                 self._process = None
-                for player in ['paplay', 'aplay', 'mpg123', 'mpv']:
+                players = ['mpg123', 'mpv', 'ffplay', 'paplay', 'aplay']  # MP3-capable players first
+                
+                for player in players:
                     try:
-                        self._process = subprocess.Popen([player, temp_path],
-                                                        stdout=subprocess.PIPE,
-                                                        stderr=subprocess.PIPE)
-                        break
+                        # For mpg123, use quiet flag
+                        if player == 'mpg123':
+                            self._process = subprocess.Popen([player, '-q', temp_path],
+                                                            stdout=subprocess.PIPE,
+                                                            stderr=subprocess.PIPE)
+                        # For mpv, use no-video flag
+                        elif player == 'mpv':
+                            self._process = subprocess.Popen([player, '--no-video', temp_path],
+                                                            stdout=subprocess.PIPE,
+                                                            stderr=subprocess.PIPE)
+                        # For ffplay, use autoexit and nodisp flags
+                        elif player == 'ffplay':
+                            self._process = subprocess.Popen([player, '-autoexit', '-nodisp', temp_path],
+                                                            stdout=subprocess.PIPE,
+                                                            stderr=subprocess.PIPE)
+                        else:
+                            # For paplay/aplay, try anyway (may not work with MP3)
+                            self._process = subprocess.Popen([player, temp_path],
+                                                            stdout=subprocess.PIPE,
+                                                            stderr=subprocess.PIPE)
+                        # Test if process started successfully
+                        if self._process and self._process.poll() is None:
+                            break  # Successfully started
+                        else:
+                            self._process = None
                     except FileNotFoundError:
                         continue
+                    except Exception as e:
+                        print(f"Error starting {player}: {e}", file=sys.stderr)
+                        continue
+                
                 if not self._process:
-                    raise Exception("No audio player found. Install: sudo apt-get install pulseaudio-utils mpg123")
+                    raise Exception("No audio player found. Install MP3-capable player: sudo apt-get install mpg123 (recommended) or sudo apt-get install mpv")
             else:
                 # Windows
                 self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
