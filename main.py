@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.0.1"
-VERSION_NAME = "1.0.1"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.0.2"
+VERSION_NAME = "1.0.2"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -219,22 +219,11 @@ class TextToSpeechThread(QThread):
             except:
                 pass  # Continue if property setting fails
         
+        # Set the voice if specified
+        # Note: Voice selection is handled in the main app's populate_voices() method
+        # The voice_id passed here should already be the correct English US voice
         if self.voice_id:
             self.engine.setProperty('voice', self.voice_id)
-        else:
-            # On Linux, try to select a better default voice if available
-            if platform.system() != 'Darwin' and self.voices:
-                try:
-                    # Prefer voices with "mb" (mbrola) or "f" (festival) in name for better quality
-                    # Also prefer voices with "en" or "english" for English
-                    better_voices = [v for v in self.voices if 
-                                   any(keyword in v.name.lower() or keyword in str(v.id).lower() 
-                                       for keyword in ['mb', 'mbrola', 'f', 'festival', 'en', 'english'])]
-                    if better_voices:
-                        # Use the first better voice found
-                        self.engine.setProperty('voice', better_voices[0].id)
-                except:
-                    pass  # Continue with default if selection fails
         
         # Say the text
         self.engine.say(self.text)
