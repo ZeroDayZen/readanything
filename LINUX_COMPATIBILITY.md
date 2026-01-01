@@ -44,14 +44,26 @@ sudo apt-get install alsa-utils pulseaudio
 
 ### 2. Install Python Dependencies
 
+**Important**: Kali Linux (and newer Linux distributions) use PEP 668 which prevents installing packages system-wide. You **must** use a virtual environment.
+
 ```bash
+# Install python3-venv if not already installed
+sudo apt-get install python3-venv
+
 # Create virtual environment
 python3 -m venv venv
+
+# Activate virtual environment
 source venv/bin/activate
+
+# Upgrade pip (recommended)
+pip install --upgrade pip
 
 # Install requirements (includes edge-tts)
 pip install -r requirements.txt
 ```
+
+**Note**: If you see an "externally-managed-environment" error, it means you're trying to install packages outside a virtual environment. Always activate the virtual environment first with `source venv/bin/activate` before running `pip install`.
 
 ### 3. Run the Application
 

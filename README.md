@@ -62,9 +62,17 @@ source venv/bin/activate  # On macOS/Linux
 
 ### 3. Install dependencies
 
+**Important for Kali Linux**: Kali uses PEP 668 which requires a virtual environment. Make sure you've activated the virtual environment (step 2) before running this command.
+
 ```bash
+# Make sure virtual environment is activated (you should see (venv) in your prompt)
+source venv/bin/activate  # If not already activated
+
+# Install dependencies (includes edge-tts)
 pip install -r requirements.txt
 ```
+
+**If you see "externally-managed-environment" error**: You're not in a virtual environment. Go back to step 2 and activate the venv first.
 
 ### 4. Linux-specific setup (if needed)
 
