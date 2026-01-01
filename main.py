@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.1.0"
-VERSION_NAME = "1.1.0"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.2.0"
+VERSION_NAME = "1.2.0"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -453,7 +453,7 @@ class ReadAnythingApp(QMainWindow):
         self.original_format = QTextCharFormat()
         # Global hotkey
         self.hotkey_thread = None
-        self.init_engine()
+        # Don't initialize pyttsx3 engine - we're using Edge TTS only
         self.init_ui()
         self.setup_global_hotkey()
         
@@ -551,20 +551,6 @@ class ReadAnythingApp(QMainWindow):
         # Controls section
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(10)
-        
-        # TTS Engine selection
-        engine_layout = QHBoxLayout()
-        engine_label = QLabel("TTS Engine:")
-        engine_label.setMinimumWidth(80)
-        engine_layout.addWidget(engine_label)
-        
-        self.tts_engine_combo = QComboBox()
-        self.tts_engine_combo.addItem("Default (System)", "default")
-        if EDGE_TTS_AVAILABLE:
-            self.tts_engine_combo.addItem("Edge TTS (AI - Free, Local)", "edge-tts")
-        self.tts_engine_combo.currentIndexChanged.connect(self.on_tts_engine_changed)
-        engine_layout.addWidget(self.tts_engine_combo)
-        controls_layout.addLayout(engine_layout)
         
         # Voice selection
         voice_layout = QHBoxLayout()
@@ -780,7 +766,75 @@ class ReadAnythingApp(QMainWindow):
         return None
     
     def populate_voices(self):
-        """Populate voice selection dropdown"""
+        """Populate voice selection dropdown with Edge TTS voices"""
+        self.voice_combo.clear()
+        
+        if not EDGE_TTS_AVAILABLE:
+            # Edge TTS not available - show error message
+            self.voice_combo.addItem("Edge TTS not installed", None)
+            QMessageBox.warning(self, "Edge TTS Required", 
+                              "Edge TTS is required for this application.\n\n"
+                              "Install with: pip install edge-tts\n\n"
+                              "Then restart the application.")
+            return
+        
+        # Fetch all available Edge TTS voices
+        try:
+            import asyncio
+            
+            async def get_voices():
+                voices = await edge_tts.list_voices()
+                return voices
+            
+            # Create event loop and fetch voices
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                all_voices = loop.run_until_complete(get_voices())
+            finally:
+                loop.close()
+            
+            # Filter for English US voices and sort them
+            english_us_voices = []
+            for voice in all_voices:
+                # Check if it's English US
+                if voice.get('Locale', '').startswith('en-US'):
+                    name = voice.get('ShortName', '')
+                    friendly_name = voice.get('FriendlyName', name)
+                    gender = voice.get('Gender', '')
+                    
+                    # Create display name
+                    if gender:
+                        display_name = f"{friendly_name} ({gender})"
+                    else:
+                        display_name = friendly_name
+                    
+                    english_us_voices.append((display_name, name))
+            
+            # Sort by display name
+            english_us_voices.sort(key=lambda x: x[0])
+            
+            # Add voices to dropdown
+            for display_name, voice_id in english_us_voices:
+                self.voice_combo.addItem(display_name, voice_id)
+            
+            # Set first voice as default
+            if self.voice_combo.count() > 0:
+                self.voice_combo.setCurrentIndex(0)
+            else:
+                self.voice_combo.addItem("No voices found", None)
+                
+        except Exception as e:
+            print(f"Error fetching Edge TTS voices: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            self.voice_combo.addItem("Error loading voices", None)
+            QMessageBox.warning(self, "Error", 
+                              f"Failed to load Edge TTS voices:\n{str(e)}\n\n"
+                              "Make sure edge-tts is installed: pip install edge-tts")
+    
+    def populate_voices_old(self):
+        """Old populate_voices method - kept for reference but not used"""
         self.voice_combo.clear()
         
         # On macOS, get voices from 'say' command
@@ -1077,46 +1131,19 @@ class ReadAnythingApp(QMainWindow):
             else:
                 self.voice_combo.addItem("Default", None)
     
-    def on_tts_engine_changed(self):
-        """Handle TTS engine selection change"""
-        # Update voice options based on selected engine
-        current_engine = self.tts_engine_combo.currentData()
-        
-        # Clear and repopulate voices based on engine type
-        self.voice_combo.clear()
-        
-        if current_engine == 'edge-tts' and EDGE_TTS_AVAILABLE:
-            # Edge TTS voices - popular English US voices
-            edge_voices = [
-                ('Aria (Neural)', 'en-US-AriaNeural'),
-                ('Jenny (Neural)', 'en-US-JennyNeural'),
-                ('Guy (Neural)', 'en-US-GuyNeural'),
-                ('Jane (Neural)', 'en-US-JaneNeural'),
-                ('Jason (Neural)', 'en-US-JasonNeural'),
-                ('Nancy (Neural)', 'en-US-NancyNeural'),
-                ('Tony (Neural)', 'en-US-TonyNeural'),
-            ]
-            for name, voice_id in edge_voices:
-                self.voice_combo.addItem(name, voice_id)
-            if self.voice_combo.count() > 0:
-                self.voice_combo.setCurrentIndex(0)
-        else:
-            # Default engine - use existing voice population
-            self.populate_voices()
-    
     def update_speed_label(self, value):
         """Update speed label when slider changes"""
         self.speed_label.setText(str(value))
     
     def play_text(self):
-        """Play the text using text-to-speech"""
+        """Play the text using text-to-speech (Edge TTS only)"""
         try:
-            # Get TTS engine type first
-            tts_engine_type = self.tts_engine_combo.currentData() if hasattr(self, 'tts_engine_combo') else 'default'
-            
-            # Only check engine for default type
-            if tts_engine_type == 'default' and not self.engine:
-                QMessageBox.warning(self, "Error", "Text-to-speech engine not available")
+            # Check if Edge TTS is available
+            if not EDGE_TTS_AVAILABLE:
+                QMessageBox.warning(self, "Edge TTS Not Available", 
+                                  "Edge TTS library is not installed.\n\n"
+                                  "Install with: pip install edge-tts\n\n"
+                                  "Then restart the application.")
                 return
             
             text = self.text_area.toPlainText().strip()
@@ -1128,51 +1155,20 @@ class ReadAnythingApp(QMainWindow):
             if self.tts_thread and self.tts_thread.isRunning():
                 self.stop_text()
             
-            # Get selected voice, speed, and TTS engine type
+            # Get selected voice and speed
             voice_id = self.voice_combo.currentData()
+            if not voice_id:
+                QMessageBox.warning(self, "Warning", "Please select a voice")
+                return
             speed = self.speed_slider.value()
-            tts_engine_type = self.tts_engine_combo.currentData()
             
-            # Create new engine instance for this thread (only for default engine)
-            # We create it in the main thread to avoid issues
-            engine = None
-            if tts_engine_type == 'default':
-                try:
-                    # Protect against any exceptions during engine creation
-                    engine = pyttsx3.init()
-                    if not engine:
-                        raise Exception("Failed to initialize TTS engine")
-                except SystemExit as e:
-                    # Prevent SystemExit from closing the app
-                    print(f"Prevented SystemExit during engine creation: {e.code}", file=sys.stderr)
-                    self.play_btn.setEnabled(True)
-                    self.statusBar().showMessage("Error: Engine creation failed")
-                    return
-                except Exception as engine_error:
-                    # Re-enable play button on error
-                    self.play_btn.setEnabled(True)
-                    self.statusBar().showMessage("Error initializing TTS engine")
-                    error_msg = str(engine_error)
-                    print(f"Error initializing TTS engine: {error_msg}", file=sys.stderr)
-                    import traceback
-                    traceback.print_exc()
-                    try:
-                        QMessageBox.critical(self, "Error", f"Failed to initialize TTS engine: {error_msg}")
-                    except:
-                        print(f"Could not show error dialog: {error_msg}", file=sys.stderr)
-                    return  # Exit early if engine creation fails
-            
-            # Check if Edge TTS is available for edge-tts engine
-            if tts_engine_type == 'edge-tts':
-                if not EDGE_TTS_AVAILABLE:
-                    QMessageBox.warning(self, "Edge TTS Not Available", 
-                                      "Edge TTS library is not installed.\n\n"
-                                      "Install with: pip install edge-tts")
-                    return
+            # Always use Edge TTS
+            tts_engine_type = 'edge-tts'
+            engine = None  # Not used for Edge TTS
             
             # Create and start thread
             try:
-                # Create thread object with TTS engine type
+                # Create thread object with Edge TTS engine type
                 self.tts_thread = TextToSpeechThread(text, engine, speed, voice_id, tts_engine_type)
                 
                 # Connect signals BEFORE starting thread
