@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.2.0"
-VERSION_NAME = "1.2.0"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.2.1"
+VERSION_NAME = "1.2.1"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -333,6 +333,13 @@ class TextToSpeechThread(QThread):
         # Stop subprocess if running (immediate termination)
         if self._process and self._process.poll() is None:
             try:
+                # Close stdin first (for streaming players like mpg123)
+                if hasattr(self._process, 'stdin') and self._process.stdin:
+                    try:
+                        self._process.stdin.close()
+                    except:
+                        pass
+                # Terminate the process
                 self._process.terminate()
                 # Wait briefly for termination, then kill if needed
                 try:
@@ -360,116 +367,231 @@ class TextToSpeechThread(QThread):
         # This allows the thread to exit quickly
     
     def _run_edge_tts(self):
-        """Run TTS using Edge TTS (free local AI TTS from Microsoft - works offline after downloading voices)"""
+        """Run TTS using Edge TTS (free local AI TTS from Microsoft - works offline after downloading voices)
+        Uses direct streaming to audio player for minimal delay"""
         if not EDGE_TTS_AVAILABLE:
             raise Exception("Edge TTS library not available. Install with: pip install edge-tts")
         
-        import tempfile
         import asyncio
-        temp_path = None
         
         try:
-            # Edge TTS uses async API, so we need to run it in an event loop
-            # Create temporary file for audio output
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            temp_path = temp_file.name
-            temp_file.close()
+            # Start audio player with stdin streaming (for faster playback)
+            self._process = None
             
-            # Run async function in sync context - use stream for faster generation
-            async def generate_speech():
-                communicate = edge_tts.Communicate(text=self.text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                
-                # Use streaming for faster processing (writes chunks as they arrive)
-                with open(temp_path, 'wb') as f:
-                    async for chunk in communicate.stream():
-                        if chunk["type"] == "audio":
-                            f.write(chunk["data"])
-            
-            # Create new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(generate_speech())
-            finally:
-                loop.close()
-            
-            # Check if output file was created
-            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                raise Exception("Edge TTS did not generate audio output")
-            
-            # Play the audio file using platform-specific player
             if platform.system() == 'Darwin':
-                # macOS
-                self._process = subprocess.Popen(['afplay', temp_path])
-            elif platform.system() == 'Linux':
-                # Linux - try multiple players (prioritize MP3-capable players)
-                # Note: paplay and aplay don't support MP3, so prioritize mpg123 and mpv
-                self._process = None
-                players = ['mpg123', 'mpv', 'ffplay', 'paplay', 'aplay']  # MP3-capable players first
+                # macOS - afplay doesn't support stdin, so we'll use a temp file approach
+                # But we can still optimize by streaming during generation
+                import tempfile
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                temp_path = temp_file.name
+                temp_file.close()
                 
-                for player in players:
+                async def generate_speech():
+                    communicate = edge_tts.Communicate(text=self.text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                    with open(temp_path, 'wb') as f:
+                        async for chunk in communicate.stream():
+                            if chunk["type"] == "audio":
+                                f.write(chunk["data"])
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(generate_speech())
+                finally:
+                    loop.close()
+                
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                    raise Exception("Edge TTS did not generate audio output")
+                
+                self._process = subprocess.Popen(['afplay', temp_path])
+                
+                # Wait for playback and cleanup
+                if self._process:
+                    while self._process.poll() is None:
+                        if not self._is_running:
+                            self._process.terminate()
+                            try:
+                                self._process.wait(timeout=0.5)
+                            except:
+                                try:
+                                    self._process.kill()
+                                except:
+                                    pass
+                            break
+                        self.msleep(100)
+                    
+                    if self._process.poll() is None:
+                        self._process.wait()
+                
+                # Cleanup temp file
+                if os.path.exists(temp_path):
                     try:
-                        # For mpg123, use quiet flag
-                        if player == 'mpg123':
-                            self._process = subprocess.Popen([player, '-q', temp_path],
-                                                            stdout=subprocess.PIPE,
-                                                            stderr=subprocess.PIPE)
-                        # For mpv, use no-video flag
-                        elif player == 'mpv':
-                            self._process = subprocess.Popen([player, '--no-video', temp_path],
-                                                            stdout=subprocess.PIPE,
-                                                            stderr=subprocess.PIPE)
-                        # For ffplay, use autoexit and nodisp flags
-                        elif player == 'ffplay':
-                            self._process = subprocess.Popen([player, '-autoexit', '-nodisp', temp_path],
-                                                            stdout=subprocess.PIPE,
-                                                            stderr=subprocess.PIPE)
-                        else:
-                            # For paplay/aplay, try anyway (may not work with MP3)
-                            self._process = subprocess.Popen([player, temp_path],
-                                                            stdout=subprocess.PIPE,
-                                                            stderr=subprocess.PIPE)
+                        os.unlink(temp_path)
+                    except:
+                        pass
+                        
+            elif platform.system() == 'Linux':
+                # Linux - use stdin streaming for faster playback
+                # Try players that support stdin streaming (prioritize mpg123)
+                players = [
+                    ('mpg123', ['-q', '-']),  # mpg123 with stdin (dash means stdin)
+                    ('mpv', ['--no-video', '--cache=no', '-']),  # mpv with stdin
+                    ('ffplay', ['-autoexit', '-nodisp', '-i', 'pipe:0']),  # ffplay with pipe
+                ]
+                
+                self._process = None
+                selected_player = None
+                
+                for player_name, player_args in players:
+                    try:
+                        # Start player with stdin
+                        self._process = subprocess.Popen(
+                            [player_name] + player_args,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
                         # Test if process started successfully
                         if self._process and self._process.poll() is None:
+                            selected_player = player_name
                             break  # Successfully started
                         else:
+                            if self._process:
+                                self._process.terminate()
                             self._process = None
                     except FileNotFoundError:
                         continue
                     except Exception as e:
-                        print(f"Error starting {player}: {e}", file=sys.stderr)
-                        continue
-                
-                if not self._process:
-                    raise Exception("No audio player found. Install MP3-capable player: sudo apt-get install mpg123 (recommended) or sudo apt-get install mpv")
-            else:
-                # Windows
-                self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
-            
-            # Wait for playback to complete
-            if self._process:
-                while self._process.poll() is None:
-                    if not self._is_running:
-                        self._process.terminate()
-                        try:
-                            self._process.wait(timeout=0.5)
-                        except:
+                        print(f"Error starting {player_name}: {e}", file=sys.stderr)
+                        if self._process:
                             try:
-                                self._process.kill()
+                                self._process.terminate()
                             except:
                                 pass
-                        break
-                    self.msleep(100)
+                        self._process = None
+                        continue
                 
-                if self._process.poll() is None:
-                    self._process.wait()
-        finally:
-            # Clean up temp file after playback completes
-            if temp_path and os.path.exists(temp_path):
+                if not self._process or not selected_player:
+                    raise Exception("No streaming-capable audio player found. Install: sudo apt-get install mpg123 (recommended) or sudo apt-get install mpv")
+                
+                # Stream audio chunks directly to player stdin
+                async def stream_to_player():
+                    communicate = edge_tts.Communicate(text=self.text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                    
+                    try:
+                        async for chunk in communicate.stream():
+                            if not self._is_running:
+                                break
+                            if chunk["type"] == "audio":
+                                # Write chunk directly to player's stdin
+                                if self._process and self._process.stdin:
+                                    try:
+                                        self._process.stdin.write(chunk["data"])
+                                        self._process.stdin.flush()  # Ensure data is sent immediately
+                                    except (BrokenPipeError, OSError):
+                                        # Player may have closed stdin or exited
+                                        break
+                        
+                        # Close stdin when done
+                        if self._process and self._process.stdin:
+                            self._process.stdin.close()
+                    except Exception as e:
+                        print(f"Error streaming audio: {e}", file=sys.stderr)
+                        if self._process and self._process.stdin:
+                            try:
+                                self._process.stdin.close()
+                            except:
+                                pass
+                        raise
+                
+                # Run streaming in event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 try:
-                    os.unlink(temp_path)
+                    loop.run_until_complete(stream_to_player())
+                finally:
+                    loop.close()
+                
+                # Wait for playback to complete
+                if self._process:
+                    while self._process.poll() is None:
+                        if not self._is_running:
+                            self._process.terminate()
+                            try:
+                                self._process.wait(timeout=0.5)
+                            except:
+                                try:
+                                    self._process.kill()
+                                except:
+                                    pass
+                            break
+                        self.msleep(100)
+                    
+                    if self._process.poll() is None:
+                        self._process.wait()
+            else:
+                # Windows - use temp file approach (Windows players don't typically support stdin well)
+                import tempfile
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                temp_path = temp_file.name
+                temp_file.close()
+                
+                async def generate_speech():
+                    communicate = edge_tts.Communicate(text=self.text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                    with open(temp_path, 'wb') as f:
+                        async for chunk in communicate.stream():
+                            if chunk["type"] == "audio":
+                                f.write(chunk["data"])
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(generate_speech())
+                finally:
+                    loop.close()
+                
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                    raise Exception("Edge TTS did not generate audio output")
+                
+                self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
+                
+                # Wait for playback and cleanup
+                if self._process:
+                    while self._process.poll() is None:
+                        if not self._is_running:
+                            self._process.terminate()
+                            try:
+                                self._process.wait(timeout=0.5)
+                            except:
+                                try:
+                                    self._process.kill()
+                                except:
+                                    pass
+                            break
+                        self.msleep(100)
+                    
+                    if self._process.poll() is None:
+                        self._process.wait()
+                
+                # Cleanup temp file
+                if os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
+        except Exception as e:
+            # Clean up process on error
+            if self._process:
+                try:
+                    if self._process.stdin:
+                        self._process.stdin.close()
                 except:
                     pass
+                try:
+                    self._process.terminate()
+                except:
+                    pass
+            raise
 
 
 class ReadAnythingApp(QMainWindow):
