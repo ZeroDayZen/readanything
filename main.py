@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.3.0"
-VERSION_NAME = "1.3.0"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.3.1"
+VERSION_NAME = "1.3.1"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -16,7 +16,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QSlider, QComboBox,
-    QMessageBox, QMenuBar, QMenu
+    QMessageBox, QMenuBar, QMenu, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon, QTextCharFormat, QTextCursor, QColor, QShortcut, QKeySequence
@@ -597,6 +597,7 @@ class TextToSpeechThread(QThread):
 class PreGenerateAudioThread(QThread):
     """Background thread to pre-generate audio for faster playback"""
     audio_ready = pyqtSignal(bytes, str, str, int)  # audio_data, text_hash, voice_id, speed
+    progress_update = pyqtSignal(int)  # Progress percentage (0-100)
     
     def __init__(self, text, voice_id, speed):
         super().__init__()
@@ -618,21 +619,33 @@ class PreGenerateAudioThread(QThread):
             # Create hash for cache key
             text_hash = hashlib.md5(f"{self.text}|{self.voice_id}|{self.speed}".encode()).hexdigest()
             
-            # Generate audio
+            # Emit start progress
+            self.progress_update.emit(0)
+            
+            # Generate audio with progress tracking
             async def generate():
                 communicate = edge_tts.Communicate(
                     text=self.text, 
                     voice=self.voice_id if self.voice_id else "en-US-AriaNeural"
                 )
                 
-                # Collect all audio chunks
+                # Collect all audio chunks with progress updates
                 audio_data = b""
+                chunk_count = 0
+                total_chunks_estimate = max(1, len(self.text) // 50)  # Rough estimate
+                
                 async for chunk in communicate.stream():
                     if not self._is_running:
                         return None
                     if chunk["type"] == "audio":
                         audio_data += chunk["data"]
+                        chunk_count += 1
+                        # Update progress (rough estimate, as we don't know total chunks)
+                        progress = min(95, int((chunk_count / total_chunks_estimate) * 100))
+                        self.progress_update.emit(progress)
                 
+                # Signal completion
+                self.progress_update.emit(100)
                 return audio_data
             
             loop = asyncio.new_event_loop()
@@ -648,6 +661,7 @@ class PreGenerateAudioThread(QThread):
         except Exception as e:
             # Silently fail - pre-generation is optional
             print(f"Pre-generation error (non-critical): {e}", file=sys.stderr)
+            self.progress_update.emit(0)  # Reset progress on error
     
     def stop(self):
         """Stop pre-generation"""
@@ -675,6 +689,7 @@ class ReadAnythingApp(QMainWindow):
         self.text_change_timer.setSingleShot(True)
         self.text_change_timer.timeout.connect(self.on_text_changed_debounced)
         self._cached_audio_process = None  # For cached audio playback
+        self.is_processing = False  # Track if currently processing TTS
         # Don't initialize pyttsx3 engine - we're using Edge TTS only
         self.init_ui()
         self.setup_global_hotkey()
@@ -808,6 +823,16 @@ class ReadAnythingApp(QMainWindow):
         controls_layout.addLayout(speed_layout)
         
         layout.addLayout(controls_layout)
+        
+        # Progress bar (hidden by default)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Processing TTS... %p%")
+        self.progress_bar.setVisible(False)  # Hidden until processing starts
+        layout.addWidget(self.progress_bar)
         
         # Action buttons
         button_layout = QHBoxLayout()
@@ -1368,7 +1393,7 @@ class ReadAnythingApp(QMainWindow):
         self.text_change_timer.start(500)  # Wait 500ms after typing stops
     
     def on_text_changed_debounced(self):
-        """Called after text change debounce - analyze and pre-generate if needed"""
+        """Called after text change debounce - analyze and start processing"""
         text = self.text_area.toPlainText().strip()
         
         if not text:
@@ -1377,43 +1402,37 @@ class ReadAnythingApp(QMainWindow):
             if self.pregen_thread and self.pregen_thread.isRunning():
                 self.pregen_thread.stop()
                 self.pregen_thread.wait(100)
+            self.progress_bar.setVisible(False)
+            self.is_processing = False
             return
         
         # Analyze text and prepare word positions for highlighting
         self.prepare_word_positions(text)
         
-        # Pre-generate audio for short text (< 500 chars)
-        text_length = len(text)
-        if text_length < 500:
-            self._start_pre_generation(text)
-        else:
-            # For longer text, just clear any old cache
-            self.audio_cache.clear()
-            if self.pregen_thread and self.pregen_thread.isRunning():
-                self.pregen_thread.stop()
-                self.pregen_thread.wait(100)
+        # Always start processing (for all text lengths)
+        self._start_processing(text)
     
     def on_voice_or_speed_changed(self):
-        """Handle voice or speed changes - invalidate cache"""
+        """Handle voice or speed changes - invalidate cache and restart processing"""
         # Clear cache when voice or speed changes
         self.audio_cache.clear()
         
-        # Stop any ongoing pre-generation
+        # Stop any ongoing processing
         if self.pregen_thread and self.pregen_thread.isRunning():
             self.pregen_thread.stop()
             self.pregen_thread.wait(100)
         
-        # Restart pre-generation if text exists
+        # Restart processing if text exists
         text = self.text_area.toPlainText().strip()
-        if text and len(text) < 500:
-            self._start_pre_generation(text)
+        if text:
+            self._start_processing(text)
     
-    def _start_pre_generation(self, text):
-        """Start background audio pre-generation"""
+    def _start_processing(self, text):
+        """Start TTS processing with progress bar"""
         if not EDGE_TTS_AVAILABLE:
             return
         
-        # Stop any existing pre-generation
+        # Stop any existing processing
         if self.pregen_thread and self.pregen_thread.isRunning():
             self.pregen_thread.stop()
             self.pregen_thread.wait(100)
@@ -1425,16 +1444,41 @@ class ReadAnythingApp(QMainWindow):
         if not voice_id:
             return
         
-        # Start new pre-generation thread
+        # Show progress bar and disable play button
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Processing TTS... %p%")
+        self.play_btn.setEnabled(False)
+        self.is_processing = True
+        self.statusBar().showMessage("Processing TTS...")
+        
+        # Start new processing thread
         self.pregen_thread = PreGenerateAudioThread(text, voice_id, speed)
         self.pregen_thread.audio_ready.connect(self.on_audio_pre_generated)
+        self.pregen_thread.progress_update.connect(self.on_processing_progress)
         self.pregen_thread.start()
+    
+    def on_processing_progress(self, progress):
+        """Update progress bar during TTS processing"""
+        self.progress_bar.setValue(progress)
+        if progress >= 100:
+            self.progress_bar.setFormat("Ready to play!")
+    
+    def _start_pre_generation(self, text):
+        """Legacy method - redirects to _start_processing"""
+        self._start_processing(text)
     
     def on_audio_pre_generated(self, audio_data, text_hash, voice_id, speed):
         """Called when audio pre-generation completes - store in cache"""
         # Create cache key
         cache_key = f"{text_hash}_{voice_id}_{speed}"
         self.audio_cache[cache_key] = audio_data
+        
+        # Hide progress bar and enable play button
+        self.progress_bar.setVisible(False)
+        self.play_btn.setEnabled(True)
+        self.is_processing = False
+        self.statusBar().showMessage("Ready to play")
     
     def _get_cache_key(self, text, voice_id, speed):
         """Generate cache key for given text, voice, and speed"""
@@ -1458,6 +1502,12 @@ class ReadAnythingApp(QMainWindow):
                 QMessageBox.warning(self, "Warning", "Please enter some text")
                 return
             
+            # Check if still processing
+            if self.is_processing:
+                QMessageBox.information(self, "Processing", 
+                                       "TTS is still being processed. Please wait for it to complete.")
+                return
+            
             # Stop any currently playing speech
             if self.tts_thread and self.tts_thread.isRunning():
                 self.stop_text()
@@ -1479,9 +1529,16 @@ class ReadAnythingApp(QMainWindow):
             
             # If we have cached audio, use it for instant playback
             if cached_audio:
-                # Use cached audio - this will be much faster
+                # Use cached audio - this will be instant
                 self._play_cached_audio(cached_audio, text, speed)
                 return
+            
+            # No cached audio - this shouldn't happen if processing completed
+            # But handle it gracefully by starting processing
+            QMessageBox.information(self, "Not Ready", 
+                                   "Audio is not ready yet. Processing will start automatically.\n"
+                                   "Please wait for the progress bar to complete.")
+            self._start_processing(text)
             
             # No cached audio - generate on demand (normal flow)
             # Create and start thread
