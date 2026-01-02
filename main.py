@@ -5,8 +5,8 @@ Supports text input, PDF, and Word documents
 """
 
 # Application version - update this for each release
-VERSION = "1.3.1"
-VERSION_NAME = "1.3.1"  # Display name (can include beta, alpha, etc.)
+VERSION = "1.3.2"
+VERSION_NAME = "1.3.2"  # Display name (can include beta, alpha, etc.)
 
 import sys
 import os
@@ -1661,34 +1661,49 @@ class ReadAnythingApp(QMainWindow):
         
         temp_path = None
         playback_process = None
-        is_running = True
         
         try:
-            # Write cached audio to temp file
+            # Write cached audio to temp file with proper flushing
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
             temp_path = temp_file.name
             temp_file.write(audio_data)
+            temp_file.flush()  # Flush to ensure data is written
+            os.fsync(temp_file.fileno())  # Force sync to disk
             temp_file.close()
             
-            # Start playback immediately
+            # Small delay to ensure file is fully written and accessible
+            import time
+            time.sleep(0.1)  # 100ms delay to ensure file system has synced
+            
+            # Start playback
             if platform.system() == 'Darwin':
+                # macOS - use afplay with buffer options if available
+                # Add a small pre-buffer by ensuring file is ready
                 playback_process = subprocess.Popen(['afplay', temp_path])
             elif platform.system() == 'Linux':
-                # Use streaming-capable players
+                # Linux - stream cached audio directly to player stdin for smoother playback
                 players = [
-                    ('mpg123', ['-q', temp_path]),
-                    ('mpv', ['--no-video', '--cache=no', temp_path]),
-                    ('ffplay', ['-autoexit', '-nodisp', temp_path]),
+                    ('mpg123', ['-q', '-']),  # Stream from stdin
+                    ('mpv', ['--no-video', '--cache=no', '--stream-buffer-size=1M', '-']),  # Stream with larger buffer
+                    ('ffplay', ['-autoexit', '-nodisp', '-i', 'pipe:0']),  # Stream from pipe
                 ]
                 
                 for player_name, player_args in players:
                     try:
                         playback_process = subprocess.Popen(
                             [player_name] + player_args,
+                            stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE
                         )
                         if playback_process and playback_process.poll() is None:
+                            # Write audio data to stdin in chunks for smoother playback
+                            chunk_size = 8192  # 8KB chunks
+                            for i in range(0, len(audio_data), chunk_size):
+                                chunk = audio_data[i:i + chunk_size]
+                                playback_process.stdin.write(chunk)
+                                playback_process.stdin.flush()
+                            playback_process.stdin.close()
                             break
                         else:
                             if playback_process:
@@ -1705,8 +1720,40 @@ class ReadAnythingApp(QMainWindow):
                         playback_process = None
                         continue
                 
+                # Fallback to file-based playback if streaming failed
                 if not playback_process:
-                    raise Exception("No audio player found")
+                    players_file = [
+                        ('mpg123', ['-q', '--buffer', '1024', temp_path]),  # Larger buffer
+                        ('mpv', ['--no-video', '--cache=yes', '--cache-secs=5', temp_path]),  # Pre-buffer
+                        ('ffplay', ['-autoexit', '-nodisp', '-bufsize', '1024000', temp_path]),  # Larger buffer
+                    ]
+                    
+                    for player_name, player_args in players_file:
+                        try:
+                            playback_process = subprocess.Popen(
+                                [player_name] + player_args,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            if playback_process and playback_process.poll() is None:
+                                break
+                            else:
+                                if playback_process:
+                                    playback_process.terminate()
+                                playback_process = None
+                        except FileNotFoundError:
+                            continue
+                        except Exception:
+                            if playback_process:
+                                try:
+                                    playback_process.terminate()
+                                except:
+                                    pass
+                            playback_process = None
+                            continue
+                    
+                    if not playback_process:
+                        raise Exception("No audio player found")
             else:
                 # Windows
                 playback_process = subprocess.Popen(['start', '/min', temp_path], shell=True)
