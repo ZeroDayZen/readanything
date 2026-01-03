@@ -538,11 +538,15 @@ class TextToSpeechThread(QThread):
                     # Use plain text (no SSML) - Edge TTS will read this directly
                     # Create communicate object with optimized settings
                     communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                    stream = None
                     
                     try:
+                        # Get the async generator
+                        stream = communicate.stream()
+                        
                         # Process chunks as fast as possible with minimal delays
                         # Start player as early as possible for lowest latency
-                        async for chunk in communicate.stream():
+                        async for chunk in stream:
                             if not self._is_running:
                                 break
                             if chunk["type"] == "audio":
@@ -584,6 +588,19 @@ class TextToSpeechThread(QThread):
                             except:
                                 pass
                         raise
+                    finally:
+                        # Properly close the async generator to prevent resource leaks
+                        if stream is not None:
+                            try:
+                                await stream.aclose()
+                            except Exception:
+                                pass
+                        # Close the communicate object's session if it has one
+                        if hasattr(communicate, '_session') and communicate._session:
+                            try:
+                                await communicate._session.close()
+                            except Exception:
+                                pass
                 
                 # Run streaming in event loop with optimized settings for faster processing
                 loop = asyncio.new_event_loop()
@@ -594,7 +611,23 @@ class TextToSpeechThread(QThread):
                     # Run with optimized settings
                     loop.run_until_complete(stream_with_buffering())
                 finally:
-                    loop.close()
+                    # Cancel all pending tasks before closing the loop
+                    try:
+                        # Get all pending tasks
+                        pending = asyncio.all_tasks(loop)
+                        if pending:
+                            # Cancel all pending tasks
+                            for task in pending:
+                                task.cancel()
+                            # Wait for cancellations to complete (with timeout)
+                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
+                    # Close the loop properly
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
                 
                 # Wait for playback to complete
                 if self._process:
@@ -649,17 +682,45 @@ class TextToSpeechThread(QThread):
                         async def generate_speech():
                             # Use plain text (no SSML) - Edge TTS will read this directly
                             communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                            with open(temp_path, 'wb') as f:
-                                async for chunk in communicate.stream():
-                                    if chunk["type"] == "audio":
-                                        f.write(chunk["data"])
+                            stream = None
+                            try:
+                                stream = communicate.stream()
+                                with open(temp_path, 'wb') as f:
+                                    async for chunk in stream:
+                                        if chunk["type"] == "audio":
+                                            f.write(chunk["data"])
+                            finally:
+                                # Properly close the async generator
+                                if stream is not None:
+                                    try:
+                                        await stream.aclose()
+                                    except Exception:
+                                        pass
+                                # Close the communicate object's session if it has one
+                                if hasattr(communicate, '_session') and communicate._session:
+                                    try:
+                                        await communicate._session.close()
+                                    except Exception:
+                                        pass
                         
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
                             loop.run_until_complete(generate_speech())
                         finally:
-                            loop.close()
+                            # Cancel all pending tasks before closing
+                            try:
+                                pending = asyncio.all_tasks(loop)
+                                if pending:
+                                    for task in pending:
+                                        task.cancel()
+                                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                            except Exception:
+                                pass
+                            try:
+                                loop.close()
+                            except Exception:
+                                pass
                         generation_complete.set()
                     except Exception as e:
                         generation_error[0] = e
@@ -728,17 +789,45 @@ class TextToSpeechThread(QThread):
                 async def generate_speech():
                     # Use plain text (no SSML) - Edge TTS will read this directly
                     communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                    with open(temp_path, 'wb') as f:
-                        async for chunk in communicate.stream():
-                            if chunk["type"] == "audio":
-                                f.write(chunk["data"])
+                    stream = None
+                    try:
+                        stream = communicate.stream()
+                        with open(temp_path, 'wb') as f:
+                            async for chunk in stream:
+                                if chunk["type"] == "audio":
+                                    f.write(chunk["data"])
+                    finally:
+                        # Properly close the async generator
+                        if stream is not None:
+                            try:
+                                await stream.aclose()
+                            except Exception:
+                                pass
+                        # Close the communicate object's session if it has one
+                        if hasattr(communicate, '_session') and communicate._session:
+                            try:
+                                await communicate._session.close()
+                            except Exception:
+                                pass
                 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
                     loop.run_until_complete(generate_speech())
                 finally:
-                    loop.close()
+                    # Cancel all pending tasks before closing
+                    try:
+                        pending = asyncio.all_tasks(loop)
+                        if pending:
+                            for task in pending:
+                                task.cancel()
+                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
                 
                 if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
                     raise Exception("Edge TTS did not generate audio output")
@@ -920,19 +1009,35 @@ class AudioPreGeneratorThread(QThread):
                     text=cleaned_text, 
                     voice=self.voice_id if self.voice_id else "en-US-AriaNeural"
                 )
-                audio_chunks = []
-                
-                async for chunk in communicate.stream():
-                    if not self._is_running:
-                        return None
-                    if chunk["type"] == "audio":
-                        audio_chunks.append(chunk["data"])
-                
-                # Combine all chunks
-                if audio_chunks:
-                    audio_data = b''.join(audio_chunks)
-                    return audio_data
-                return None
+                stream = None
+                try:
+                    stream = communicate.stream()
+                    audio_chunks = []
+                    
+                    async for chunk in stream:
+                        if not self._is_running:
+                            return None
+                        if chunk["type"] == "audio":
+                            audio_chunks.append(chunk["data"])
+                    
+                    # Combine all chunks
+                    if audio_chunks:
+                        audio_data = b''.join(audio_chunks)
+                        return audio_data
+                    return None
+                finally:
+                    # Properly close the async generator
+                    if stream is not None:
+                        try:
+                            await stream.aclose()
+                        except Exception:
+                            pass
+                    # Close the communicate object's session if it has one
+                    if hasattr(communicate, '_session') and communicate._session:
+                        try:
+                            await communicate._session.close()
+                        except Exception:
+                            pass
             
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -942,7 +1047,19 @@ class AudioPreGeneratorThread(QThread):
                     # Emit signal with text hash and audio data
                     self.audio_ready.emit(self._text_hash, audio_data)
             finally:
-                loop.close()
+                # Cancel all pending tasks before closing
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    if pending:
+                        for task in pending:
+                            task.cancel()
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+                try:
+                    loop.close()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Pre-generation error: {e}", file=sys.stderr)
     
