@@ -126,11 +126,10 @@ class TextToSpeechThread(QThread):
         # Convert to say command rate (roughly 1:1 mapping)
         return int(rate)
     
-    def _convert_rate_to_edge_tts_ssml(self, rate):
-        """Convert WPM rate to Edge TTS SSML rate percentage
-        Edge TTS rate is specified as percentage: -50% to +100%
-        Average speaking rate is ~150 WPM (0%)
-        Formula: rate_percent = ((wpm - 150) / 150) * 100
+    def _convert_rate_to_playback_speed(self, rate):
+        """Convert WPM rate to audio playback speed multiplier
+        Average speaking rate is ~150 WPM (1.0x speed = normal)
+        Formula: speed = wpm / 150
         """
         # Clamp rate to valid range
         if rate < 50:
@@ -138,16 +137,17 @@ class TextToSpeechThread(QThread):
         elif rate > 300:
             rate = 300
         
-        # Convert WPM to percentage (150 WPM = 0%, baseline)
-        # For Edge TTS: -50% to +100% is typical range
-        # Map 50-300 WPM to approximately -66% to +100%
+        # Convert WPM to playback speed multiplier
+        # 150 WPM = 1.0x (normal speed)
+        # 50 WPM = 0.33x (slow)
+        # 300 WPM = 2.0x (fast)
         baseline_wpm = 150
-        rate_percent = ((rate - baseline_wpm) / baseline_wpm) * 100
+        speed_multiplier = rate / baseline_wpm
         
-        # Clamp to Edge TTS valid range (-50% to +100%)
-        rate_percent = max(-50, min(100, rate_percent))
+        # Clamp to reasonable playback speed range (0.3x to 2.5x)
+        speed_multiplier = max(0.3, min(2.5, speed_multiplier))
         
-        return f"{rate_percent:+.0f}%"
+        return speed_multiplier
     
     def _clean_text_for_tts(self, text):
         """Clean text to prevent Edge TTS from reading URLs or other unwanted content
@@ -422,28 +422,30 @@ class TextToSpeechThread(QThread):
             # Clean text to remove URLs and prevent Edge TTS from reading them
             cleaned_text = self._clean_text_for_tts(self.text)
             
-            # Convert rate to Edge TTS SSML rate percentage
-            rate_percent = self._convert_rate_to_edge_tts_ssml(self.rate)
+            # Convert rate to playback speed multiplier for audio player
+            playback_speed = self._convert_rate_to_playback_speed(self.rate)
             
-            # Build SSML text with rate control for proper speed adjustment
-            # Edge TTS supports SSML prosody for rate control
-            # Escape XML special characters in text
-            import html
-            escaped_text = html.escape(cleaned_text)
-            ssml_text = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"><prosody rate="{rate_percent}">{escaped_text}</prosody></speak>'
+            # Use plain text (no SSML) - Edge TTS doesn't properly support SSML
+            # Rate control will be handled through audio playback speed adjustment
             
             if platform.system() == 'Linux':
                 # Linux - use buffered streaming for low latency and smooth playback
                 # Strategy: Buffer initial chunks, then start player and continue streaming
                 
-                # Try players that support MP3 stdin streaming, prioritized by quality and latency
+                # Try players that support MP3 stdin streaming with speed control, prioritized by quality and latency
+                # mpv supports --speed for playback speed adjustment
+                mpv_speed_args = ['--no-video', '--no-terminal', '--audio-buffer=0.3', '--stream-buffer-size=32KB', '--cache=no', '--audio-stream-buffer=0.3', f'--speed={playback_speed:.2f}', '-']
+                # ffplay supports atempo filter for speed adjustment
+                ffplay_speed_filter = f'atempo={playback_speed:.2f}'
+                ffplay_speed_args = ['-autoexit', '-nodisp', '-i', 'pipe:0', '-af', ffplay_speed_filter]
+                
                 players = [
-                    # mpv - best quality, low latency, excellent buffering for MP3
-                    ('mpv', ['--no-video', '--no-terminal', '--audio-buffer=0.3', '--stream-buffer-size=32KB', '--cache=no', '--audio-stream-buffer=0.3', '-']),
-                    # mpg123 - excellent for MP3 streaming, very low latency
+                    # mpv - best quality, low latency, supports speed adjustment
+                    ('mpv', mpv_speed_args),
+                    # ffplay - fallback, supports speed via atempo filter
+                    ('ffplay', ffplay_speed_args),
+                    # mpg123 - no speed control, but very low latency (fallback only)
                     ('mpg123', ['-q', '--stereo', '--buffer', '16384', '-']),
-                    # ffplay - fallback, handles MP3 streaming
-                    ('ffplay', ['-autoexit', '-nodisp', '-i', 'pipe:0', '-af', 'aresample=resampler=soxr']),
                 ]
                 
                 self._process = None
@@ -491,7 +493,8 @@ class TextToSpeechThread(QThread):
                 
                 async def stream_with_buffering():
                     nonlocal buffer_filled, player_started
-                    communicate = edge_tts.Communicate(text=ssml_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                    # Use plain text (no SSML) - Edge TTS will read this directly
+                    communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
                     
                     try:
                         async for chunk in communicate.stream():
@@ -576,7 +579,8 @@ class TextToSpeechThread(QThread):
                 def generate_in_background():
                     try:
                         async def generate_speech():
-                            communicate = edge_tts.Communicate(text=ssml_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                            # Use plain text (no SSML) - Edge TTS will read this directly
+                            communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
                             with open(temp_path, 'wb') as f:
                                 async for chunk in communicate.stream():
                                     if chunk["type"] == "audio":
@@ -606,8 +610,21 @@ class TextToSpeechThread(QThread):
                 if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
                     raise Exception("Edge TTS did not generate audio output")
                 
-                # Start playback immediately
-                self._process = subprocess.Popen(['afplay', temp_path])
+                # Start playback with speed adjustment
+                # afplay doesn't support speed, so we'll use ffplay if available, otherwise normal speed
+                try:
+                    # Try ffplay for speed adjustment (if available)
+                    result = subprocess.run(['which', 'ffplay'], capture_output=True, timeout=1)
+                    if result.returncode == 0:
+                        # Use ffplay with speed adjustment via atempo filter
+                        ffplay_speed_filter = f'atempo={playback_speed:.2f}'
+                        self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', temp_path, '-af', ffplay_speed_filter])
+                    else:
+                        # Fallback to afplay at normal speed (no speed control on macOS without ffplay)
+                        self._process = subprocess.Popen(['afplay', temp_path])
+                except:
+                    # Fallback to afplay at normal speed
+                    self._process = subprocess.Popen(['afplay', temp_path])
                 
                 # Wait for playback
                 if self._process:
@@ -641,7 +658,8 @@ class TextToSpeechThread(QThread):
                 temp_file.close()
                 
                 async def generate_speech():
-                    communicate = edge_tts.Communicate(text=ssml_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
+                    # Use plain text (no SSML) - Edge TTS will read this directly
+                    communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
                     with open(temp_path, 'wb') as f:
                         async for chunk in communicate.stream():
                             if chunk["type"] == "audio":
@@ -657,7 +675,19 @@ class TextToSpeechThread(QThread):
                 if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
                     raise Exception("Edge TTS did not generate audio output")
                 
-                self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
+                # Windows - use ffplay with speed adjustment if available, otherwise default player
+                try:
+                    result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, shell=True)
+                    if result.returncode == 0:
+                        # Use ffplay with speed adjustment
+                        ffplay_speed_filter = f'atempo={playback_speed:.2f}'
+                        self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', temp_path, '-af', ffplay_speed_filter])
+                    else:
+                        # Fallback to default Windows player (no speed control)
+                        self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
+                except:
+                    # Fallback to default Windows player
+                    self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
                 
                 # Wait for playback
                 if self._process:
