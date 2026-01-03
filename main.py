@@ -114,8 +114,6 @@ class TextToSpeechThread(QThread):
         self._process = None
         # Prevent thread from causing app to exit
         self.setTerminationEnabled(False)
-        # Set higher priority for faster processing
-        self.setPriority(QThread.Priority.HighPriority)
     
     def _convert_rate_to_say_speed(self, rate):
         """Convert pyttsx3 rate (words per minute) to say command -r rate"""
@@ -176,6 +174,14 @@ class TextToSpeechThread(QThread):
         try:
             if not self._is_running:
                 return
+            
+            # Set higher thread priority now that thread is running
+            # This must be done in run() method, not __init__()
+            try:
+                self.setPriority(QThread.Priority.HighPriority)
+            except Exception:
+                # If priority setting fails, continue anyway
+                pass
             
             # Increase CPU priority for this thread to reduce latency
             try:
