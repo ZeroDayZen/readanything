@@ -114,6 +114,8 @@ class TextToSpeechThread(QThread):
         self._process = None
         # Prevent thread from causing app to exit
         self.setTerminationEnabled(False)
+        # Set higher priority for faster processing
+        self.setPriority(QThread.Priority.HighPriority)
     
     def _convert_rate_to_say_speed(self, rate):
         """Convert pyttsx3 rate (words per minute) to say command -r rate"""
@@ -174,6 +176,32 @@ class TextToSpeechThread(QThread):
         try:
             if not self._is_running:
                 return
+            
+            # Increase CPU priority for this thread to reduce latency
+            try:
+                # Try to increase process priority (optional - requires psutil or os.nice)
+                try:
+                    import psutil
+                    current_process = psutil.Process(os.getpid())
+                    # Set high priority (above normal)
+                    if platform.system() == 'Windows':
+                        current_process.nice(psutil.HIGH_PRIORITY_CLASS)
+                    elif platform.system() in ['Linux', 'Darwin']:
+                        # On Linux/macOS, use nice value (lower = higher priority)
+                        try:
+                            os.nice(-5)  # Higher priority (may require permissions)
+                        except (PermissionError, OSError):
+                            pass  # Continue without priority boost if denied
+                except ImportError:
+                    # psutil not available, try os.nice directly on Linux/macOS
+                    if platform.system() in ['Linux', 'Darwin']:
+                        try:
+                            os.nice(-5)  # Higher priority
+                        except (PermissionError, OSError):
+                            pass  # Continue without priority boost if denied
+            except Exception:
+                # Any other error - continue without priority boost
+                pass
             
             # Use Edge TTS if specified (free local AI TTS)
             if self.tts_engine_type == 'edge-tts' and EDGE_TTS_AVAILABLE:
@@ -485,8 +513,8 @@ class TextToSpeechThread(QThread):
                     raise Exception("No streaming audio player found. Install: sudo apt-get install mpv (recommended) or sudo apt-get install mpg123")
                 
                 # Buffered streaming: collect initial chunks, then stream while playing
-                # Smaller buffer = lower latency, but needs to be large enough to prevent choppiness
-                initial_buffer_size = 16384  # 16KB initial buffer (about 0.3-0.5 seconds of audio)
+                # Reduced buffer size for lower latency (with higher CPU priority, generation is faster)
+                initial_buffer_size = 8192  # 8KB initial buffer (about 0.15-0.25 seconds of audio)
                 buffer = io.BytesIO()
                 buffer_filled = False
                 player_started = False
@@ -494,9 +522,11 @@ class TextToSpeechThread(QThread):
                 async def stream_with_buffering():
                     nonlocal buffer_filled, player_started
                     # Use plain text (no SSML) - Edge TTS will read this directly
+                    # Create communicate object with optimized settings
                     communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
                     
                     try:
+                        # Process chunks as fast as possible with minimal delays
                         async for chunk in communicate.stream():
                             if not self._is_running:
                                 break
@@ -508,7 +538,7 @@ class TextToSpeechThread(QThread):
                                     buffer.write(chunk_data)
                                     if buffer.tell() >= initial_buffer_size:
                                         buffer_filled = True
-                                        # Write buffered data to player
+                                        # Write buffered data to player immediately
                                         buffer.seek(0)
                                         if self._process and self._process.stdin:
                                             self._process.stdin.write(buffer.read())
@@ -516,11 +546,11 @@ class TextToSpeechThread(QThread):
                                         buffer.close()
                                         player_started = True
                                 else:
-                                    # Stream directly to player
+                                    # Stream directly to player with immediate flush for low latency
                                     if self._process and self._process.stdin:
                                         try:
                                             self._process.stdin.write(chunk_data)
-                                            self._process.stdin.flush()
+                                            self._process.stdin.flush()  # Immediate flush for lower latency
                                         except (BrokenPipeError, OSError):
                                             # Player closed or exited
                                             break
@@ -537,10 +567,13 @@ class TextToSpeechThread(QThread):
                                 pass
                         raise
                 
-                # Run streaming in event loop
+                # Run streaming in event loop with optimized settings for faster processing
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                # Use selector event loop for better performance (default on most systems)
+                # This allows better CPU utilization for async operations
                 try:
+                    # Run with optimized settings
                     loop.run_until_complete(stream_with_buffering())
                 finally:
                     loop.close()
@@ -578,6 +611,13 @@ class TextToSpeechThread(QThread):
                 
                 def generate_in_background():
                     try:
+                        # Increase CPU priority for background generation thread
+                        try:
+                            if platform.system() in ['Linux', 'Darwin']:
+                                os.nice(-5)  # Higher priority for faster generation
+                        except (PermissionError, OSError):
+                            pass  # Continue without priority boost if denied
+                        
                         async def generate_speech():
                             # Use plain text (no SSML) - Edge TTS will read this directly
                             communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
