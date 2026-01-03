@@ -744,18 +744,74 @@ class TextToSpeechThread(QThread):
                     raise Exception("Edge TTS did not generate audio output")
                 
                 # Windows - use ffplay with speed adjustment if available, otherwise default player
+                # Use os.startfile() instead of shell=True for security
                 try:
-                    result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, shell=True)
-                    if result.returncode == 0:
+                    # Try to find ffplay without using shell
+                    ffplay_path = None
+                    # Check common locations for ffplay
+                    common_paths = [
+                        r'C:\ffmpeg\bin\ffplay.exe',
+                        r'C:\Program Files\ffmpeg\bin\ffplay.exe',
+                        r'C:\Program Files (x86)\ffmpeg\bin\ffplay.exe',
+                    ]
+                    # Also try using 'where' command without shell
+                    try:
+                        result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, text=True)
+                        if result.returncode == 0 and result.stdout.strip():
+                            ffplay_path = result.stdout.strip().split('\n')[0]
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                        pass
+                    
+                    # Check common paths
+                    if not ffplay_path:
+                        for path in common_paths:
+                            if os.path.exists(path):
+                                ffplay_path = path
+                                break
+                    
+                    if ffplay_path:
                         # Use ffplay with speed adjustment
                         ffplay_speed_filter = f'atempo={playback_speed:.2f}'
-                        self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', temp_path, '-af', ffplay_speed_filter])
+                        self._process = subprocess.Popen([ffplay_path, '-autoexit', '-nodisp', '-i', temp_path, '-af', ffplay_speed_filter])
                     else:
-                        # Fallback to default Windows player (no speed control)
-                        self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
-                except:
-                    # Fallback to default Windows player
-                    self._process = subprocess.Popen(['start', '/min', temp_path], shell=True)
+                        # Use os.startfile() - safer than shell=True, opens with default player
+                        # Note: os.startfile() doesn't return a process object, so we can't track it
+                        # For tracking, we'll use a minimal subprocess approach
+                        os.startfile(temp_path)
+                        # Create a dummy process object for compatibility
+                        # Since os.startfile() doesn't block, we'll use a wait thread
+                        import threading
+                        def wait_for_file_deletion():
+                            # Wait a bit then check if file still exists (rough playback detection)
+                            import time
+                            time.sleep(0.5)
+                            # Estimate playback time based on file size (rough estimate)
+                            if os.path.exists(temp_path):
+                                file_size = os.path.getsize(temp_path)
+                                # Rough estimate: 1MB ≈ 1 minute of audio
+                                estimated_seconds = max(1, file_size / (1024 * 1024) * 60)
+                                time.sleep(estimated_seconds)
+                        
+                        wait_thread = threading.Thread(target=wait_for_file_deletion, daemon=True)
+                        wait_thread.start()
+                        # Create a dummy process for compatibility with stop() method
+                        self._process = type('DummyProcess', (), {
+                            'poll': lambda: None,
+                            'terminate': lambda: None,
+                            'wait': lambda timeout=None: None,
+                        })()
+                except Exception as e:
+                    # Fallback to os.startfile() - safest option
+                    try:
+                        os.startfile(temp_path)
+                        # Create dummy process for compatibility
+                        self._process = type('DummyProcess', (), {
+                            'poll': lambda: None,
+                            'terminate': lambda: None,
+                            'wait': lambda timeout=None: None,
+                        })()
+                    except Exception:
+                        raise Exception("Could not play audio file on Windows")
                 
                 # Wait for playback
                 if self._process:
@@ -1740,15 +1796,56 @@ class ReadAnythingApp(QMainWindow):
                             except:
                                 self._process = subprocess.Popen(['afplay', self.temp_path])
                         else:
+                            # Windows - use os.startfile() instead of shell=True for security
                             try:
-                                result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, shell=True)
-                                if result.returncode == 0:
+                                # Try to find ffplay without using shell
+                                ffplay_path = None
+                                # Check common locations for ffplay
+                                common_paths = [
+                                    r'C:\ffmpeg\bin\ffplay.exe',
+                                    r'C:\Program Files\ffmpeg\bin\ffplay.exe',
+                                    r'C:\Program Files (x86)\ffmpeg\bin\ffplay.exe',
+                                ]
+                                # Also try using 'where' command without shell
+                                try:
+                                    result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, text=True)
+                                    if result.returncode == 0 and result.stdout.strip():
+                                        ffplay_path = result.stdout.strip().split('\n')[0]
+                                except (FileNotFoundError, subprocess.TimeoutExpired):
+                                    pass
+                                
+                                # Check common paths
+                                if not ffplay_path:
+                                    for path in common_paths:
+                                        if os.path.exists(path):
+                                            ffplay_path = path
+                                            break
+                                
+                                if ffplay_path:
+                                    # Use ffplay with speed adjustment
                                     ffplay_speed_filter = f'atempo={self.playback_speed:.2f}'
-                                    self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', self.temp_path, '-af', ffplay_speed_filter])
+                                    self._process = subprocess.Popen([ffplay_path, '-autoexit', '-nodisp', '-i', self.temp_path, '-af', ffplay_speed_filter])
                                 else:
-                                    self._process = subprocess.Popen(['start', '/min', self.temp_path], shell=True)
-                            except:
-                                self._process = subprocess.Popen(['start', '/min', self.temp_path], shell=True)
+                                    # Use os.startfile() - safer than shell=True
+                                    os.startfile(self.temp_path)
+                                    # Create dummy process for compatibility
+                                    self._process = type('DummyProcess', (), {
+                                        'poll': lambda: None,
+                                        'terminate': lambda: None,
+                                        'wait': lambda timeout=None: None,
+                                    })()
+                            except Exception:
+                                # Fallback to os.startfile()
+                                try:
+                                    os.startfile(self.temp_path)
+                                    # Create dummy process for compatibility
+                                    self._process = type('DummyProcess', (), {
+                                        'poll': lambda: None,
+                                        'terminate': lambda: None,
+                                        'wait': lambda timeout=None: None,
+                                    })()
+                                except Exception:
+                                    raise Exception("Could not play audio file on Windows")
                         
                         # Wait for playback
                         if self._process:
