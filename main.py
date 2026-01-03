@@ -797,6 +797,104 @@ class TextToSpeechThread(QThread):
             raise
 
 
+class AudioPreGeneratorThread(QThread):
+    """Background thread to pre-generate audio while user is typing"""
+    audio_ready = pyqtSignal(str, bytes)  # Emits (text_hash, audio_data) when ready
+    
+    def __init__(self, text, voice_id):
+        super().__init__()
+        self.text = text
+        self.voice_id = voice_id
+        self._is_running = True
+        self._text_hash = None
+    
+    def _clean_text_for_tts(self, text):
+        """Clean text to remove URLs (same as TextToSpeechThread)"""
+        import re
+        url_patterns = [
+            r'https?://[^\s<>"\'{}|\\^`\[\]]+',
+            r'www\.[^\s<>"\'{}|\\^`\[\]]+',
+            r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.(?:[a-zA-Z]{2,})(?:/[^\s<>"\'{}|\\^`\[\]]*)?',
+        ]
+        cleaned_text = text
+        for pattern in url_patterns:
+            cleaned_text = re.sub(pattern, 'link', cleaned_text, flags=re.IGNORECASE)
+        return cleaned_text
+    
+    def run(self):
+        """Pre-generate audio in background"""
+        if not EDGE_TTS_AVAILABLE:
+            return
+        
+        try:
+            # Set higher thread priority for faster generation
+            try:
+                self.setPriority(QThread.Priority.HighPriority)
+            except Exception:
+                pass
+            
+            # Increase CPU priority
+            try:
+                if platform.system() in ['Linux', 'Darwin']:
+                    try:
+                        os.nice(-15)
+                    except (PermissionError, OSError):
+                        try:
+                            os.nice(-10)
+                        except (PermissionError, OSError):
+                            try:
+                                os.nice(-5)
+                            except (PermissionError, OSError):
+                                pass
+            except Exception:
+                pass
+            
+            # Create hash of text to identify this generation
+            import hashlib
+            self._text_hash = hashlib.md5(self.text.encode()).hexdigest()
+            
+            # Clean text
+            cleaned_text = self._clean_text_for_tts(self.text)
+            
+            # Generate audio
+            import asyncio
+            
+            async def generate_audio():
+                communicate = edge_tts.Communicate(
+                    text=cleaned_text, 
+                    voice=self.voice_id if self.voice_id else "en-US-AriaNeural"
+                )
+                audio_chunks = []
+                
+                async for chunk in communicate.stream():
+                    if not self._is_running:
+                        return None
+                    if chunk["type"] == "audio":
+                        audio_chunks.append(chunk["data"])
+                
+                # Combine all chunks
+                if audio_chunks:
+                    audio_data = b''.join(audio_chunks)
+                    return audio_data
+                return None
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                audio_data = loop.run_until_complete(generate_audio())
+                if audio_data and self._is_running:
+                    # Emit signal with text hash and audio data
+                    self.audio_ready.emit(self._text_hash, audio_data)
+            finally:
+                loop.close()
+        except Exception as e:
+            print(f"Pre-generation error: {e}", file=sys.stderr)
+    
+    def stop(self):
+        """Stop pre-generation"""
+        self._is_running = False
+
+
 class ReadAnythingApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -811,6 +909,14 @@ class ReadAnythingApp(QMainWindow):
         self.original_format = QTextCharFormat()
         # Global hotkey
         self.hotkey_thread = None
+        # Pre-generation for faster playback
+        self.pregen_thread = None
+        self.pregen_timer = QTimer()
+        self.pregen_timer.setSingleShot(True)
+        self.pregen_timer.timeout.connect(self.start_pre_generation)
+        self.pregen_audio = {}  # Store pre-generated audio by text hash
+        self.current_text_hash = None
+        self.pregen_playback_thread = None
         # Don't initialize pyttsx3 engine - we're using Edge TTS only
         self.init_ui()
         self.setup_global_hotkey()
@@ -904,6 +1010,8 @@ class ReadAnythingApp(QMainWindow):
         self.text_area.setPlaceholderText("Type or paste your text here...")
         self.text_area.setFont(QFont("Arial", 12))
         self.text_area.setStyleSheet("background-color: white; color: black;")
+        # Connect text change signal to start pre-generation
+        self.text_area.textChanged.connect(self.on_text_changed)
         layout.addWidget(self.text_area)
         
         # Controls section
@@ -1493,6 +1601,208 @@ class ReadAnythingApp(QMainWindow):
         """Update speed label when slider changes"""
         self.speed_label.setText(str(value))
     
+    def on_text_changed(self):
+        """Called when text in text area changes - start pre-generation timer"""
+        # Stop any existing pre-generation
+        if self.pregen_thread and self.pregen_thread.isRunning():
+            self.pregen_thread.stop()
+            self.pregen_thread.wait(100)
+        
+        # Clear old pre-generated audio
+        self.pregen_audio.clear()
+        self.current_text_hash = None
+        
+        # Start timer to wait for user to stop typing (500ms delay)
+        # This prevents generating audio for every keystroke
+        self.pregen_timer.stop()
+        self.pregen_timer.start(500)  # Wait 500ms after user stops typing
+    
+    def start_pre_generation(self):
+        """Start pre-generating audio in background"""
+        if not EDGE_TTS_AVAILABLE:
+            return
+        
+        text = self.text_area.toPlainText().strip()
+        if not text or len(text) < 3:  # Don't pre-generate for very short text
+            return
+        
+        # Get current voice
+        voice_id = self.voice_combo.currentData()
+        if not voice_id:
+            return
+        
+        # Stop any existing pre-generation
+        if self.pregen_thread and self.pregen_thread.isRunning():
+            self.pregen_thread.stop()
+            self.pregen_thread.wait(100)
+        
+        # Create hash of current text
+        import hashlib
+        self.current_text_hash = hashlib.md5(text.encode()).hexdigest()
+        
+        # Check if we already have this audio pre-generated
+        if self.current_text_hash in self.pregen_audio:
+            return  # Already generated
+        
+        # Start pre-generation thread
+        self.pregen_thread = AudioPreGeneratorThread(text, voice_id)
+        self.pregen_thread.audio_ready.connect(self.on_audio_ready)
+        self.pregen_thread.start()
+    
+    def on_audio_ready(self, text_hash, audio_data):
+        """Called when pre-generated audio is ready"""
+        # Store pre-generated audio
+        self.pregen_audio[text_hash] = audio_data
+        # Update status to show audio is ready
+        if text_hash == self.current_text_hash:
+            self.statusBar().showMessage("Audio ready - click Play to start")
+    
+    def _play_pre_generated_audio(self, audio_data, speed):
+        """Play pre-generated audio data immediately"""
+        import tempfile
+        
+        try:
+            # Convert rate to playback speed multiplier (same logic as TextToSpeechThread)
+            if speed < 50:
+                speed = 50
+            elif speed > 300:
+                speed = 300
+            baseline_wpm = 150
+            playback_speed = speed / baseline_wpm
+            playback_speed = max(0.3, min(2.5, playback_speed))
+            
+            # Write audio data to temp file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_path = temp_file.name
+            temp_file.write(audio_data)
+            temp_file.close()
+            
+            # Get text for highlighting
+            text = self.text_area.toPlainText().strip()
+            
+            # Create a simple thread to handle playback (similar to TextToSpeechThread)
+            # This allows us to track the process and stop it if needed
+            class PreGenPlaybackThread(QThread):
+                finished = pyqtSignal()
+                
+                def __init__(self, temp_path, playback_speed, parent):
+                    super().__init__()
+                    self.temp_path = temp_path
+                    self.playback_speed = playback_speed
+                    self.parent = parent
+                    self._process = None
+                
+                def run(self):
+                    try:
+                        # Play audio with platform-specific players
+                        if platform.system() == 'Linux':
+                            players = [
+                                ('mpv', ['--no-video', '--no-terminal', '--audio-buffer=0.1', f'--speed={self.playback_speed:.2f}', self.temp_path]),
+                                ('ffplay', ['-autoexit', '-nodisp', '-i', self.temp_path, '-af', f'atempo={self.playback_speed:.2f}']),
+                                ('paplay', [self.temp_path]),
+                            ]
+                            
+                            for player_name, player_args in players:
+                                try:
+                                    self._process = subprocess.Popen(
+                                        [player_name] + player_args,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    if self._process and self._process.poll() is None:
+                                        break
+                                    else:
+                                        if self._process:
+                                            self._process.terminate()
+                                        self._process = None
+                                except FileNotFoundError:
+                                    continue
+                                except Exception:
+                                    if self._process:
+                                        try:
+                                            self._process.terminate()
+                                        except:
+                                            pass
+                                    self._process = None
+                                    continue
+                            
+                            if not self._process:
+                                raise Exception("No audio player found")
+                                
+                        elif platform.system() == 'Darwin':
+                            try:
+                                result = subprocess.run(['which', 'ffplay'], capture_output=True, timeout=1)
+                                if result.returncode == 0:
+                                    ffplay_speed_filter = f'atempo={self.playback_speed:.2f}'
+                                    self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', self.temp_path, '-af', ffplay_speed_filter])
+                                else:
+                                    self._process = subprocess.Popen(['afplay', self.temp_path])
+                            except:
+                                self._process = subprocess.Popen(['afplay', self.temp_path])
+                        else:
+                            try:
+                                result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, shell=True)
+                                if result.returncode == 0:
+                                    ffplay_speed_filter = f'atempo={self.playback_speed:.2f}'
+                                    self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', self.temp_path, '-af', ffplay_speed_filter])
+                                else:
+                                    self._process = subprocess.Popen(['start', '/min', self.temp_path], shell=True)
+                            except:
+                                self._process = subprocess.Popen(['start', '/min', self.temp_path], shell=True)
+                        
+                        # Wait for playback
+                        if self._process:
+                            self._process.wait()
+                    except Exception as e:
+                        print(f"Error in pre-generated playback: {e}", file=sys.stderr)
+                    finally:
+                        # Cleanup temp file
+                        if os.path.exists(self.temp_path):
+                            try:
+                                os.unlink(self.temp_path)
+                            except:
+                                pass
+                        self.finished.emit()
+                
+                def stop(self):
+                    if self._process:
+                        try:
+                            self._process.terminate()
+                            self._process.wait(timeout=0.5)
+                        except:
+                            try:
+                                self._process.kill()
+                            except:
+                                pass
+            
+            # Create and start playback thread
+            self.pregen_playback_thread = PreGenPlaybackThread(temp_path, playback_speed, self)
+            self.pregen_playback_thread.finished.connect(self.on_speech_finished)
+            
+            # Store process reference for stopping
+            self._pregen_process = self.pregen_playback_thread._process
+            
+            # Start word highlighting
+            self.start_highlighting(text, speed)
+            
+            # Update UI
+            self.play_btn.setEnabled(False)
+            self.statusBar().showMessage("Playing (pre-generated)...")
+            
+            # Start playback thread
+            self.pregen_playback_thread.start()
+            
+        except Exception as e:
+            # Fallback to normal generation if pre-generated playback fails
+            print(f"Error playing pre-generated audio: {e}", file=sys.stderr)
+            # Clean up temp file
+            if 'temp_path' in locals() and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+            # Fall through to normal generation
+    
     def play_text(self):
         """Play the text using text-to-speech (Edge TTS only)"""
         try:
@@ -1520,6 +1830,17 @@ class ReadAnythingApp(QMainWindow):
                 return
             speed = self.speed_slider.value()
             
+            # Check if we have pre-generated audio for this text
+            import hashlib
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            
+            if text_hash in self.pregen_audio:
+                # Use pre-generated audio for instant playback!
+                audio_data = self.pregen_audio[text_hash]
+                self._play_pre_generated_audio(audio_data, speed)
+                return
+            
+            # No pre-generated audio available - generate on demand
             # Always use Edge TTS
             tts_engine_type = 'edge-tts'
             engine = None  # Not used for Edge TTS
@@ -1595,11 +1916,16 @@ class ReadAnythingApp(QMainWindow):
         # Stop highlighting immediately
         self.stop_highlighting()
         
-        # Stop the thread immediately
+        # Stop the TTS thread immediately
         if self.tts_thread and self.tts_thread.isRunning():
             self.tts_thread.stop()
             # Wait with timeout to avoid hanging
             self.tts_thread.wait(100)  # Wait max 100ms for thread to stop
+        
+        # Stop pre-generated playback thread if running
+        if hasattr(self, 'pregen_playback_thread') and self.pregen_playback_thread and self.pregen_playback_thread.isRunning():
+            self.pregen_playback_thread.stop()
+            self.pregen_playback_thread.wait(100)
         
         # Also stop the main engine if it exists (for redundancy)
         if self.engine:
