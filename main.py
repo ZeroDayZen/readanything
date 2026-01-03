@@ -1435,6 +1435,9 @@ class ReadAnythingApp(QMainWindow):
             
             # Filter for English US voices and sort them
             english_us_voices = []
+            default_voice_id = None
+            default_voice_display = None
+            
             for voice in all_voices:
                 # Check if it's English US
                 if voice.get('Locale', '').startswith('en-US'):
@@ -1448,18 +1451,42 @@ class ReadAnythingApp(QMainWindow):
                     else:
                         display_name = friendly_name
                     
-                    english_us_voices.append((display_name, name))
+                    # Check if this is Microsoft Andrew Online (Natural)
+                    # Look for "Andrew" in the friendly name (case-insensitive)
+                    # Voice ID is typically "en-US-AndrewNeural" for natural voices
+                    friendly_lower = friendly_name.lower()
+                    name_lower = name.lower()
+                    if 'andrew' in friendly_lower or 'andrew' in name_lower:
+                        # Prefer Natural/Neural voices, but accept any Andrew voice
+                        if 'neural' in name_lower or 'natural' in friendly_lower or 'natural' in str(voice.get('VoiceType', '')).lower():
+                            default_voice_id = name
+                            default_voice_display = display_name
+                        elif not default_voice_id:
+                            # If we haven't found a Natural Andrew yet, use this as fallback
+                            default_voice_id = name
+                            default_voice_display = display_name
+                    else:
+                        english_us_voices.append((display_name, name))
             
             # Sort by display name
             english_us_voices.sort(key=lambda x: x[0])
             
-            # Add voices to dropdown
+            # Add default voice first (Andrew) if found
+            if default_voice_id:
+                self.voice_combo.addItem(default_voice_display, default_voice_id)
+            
+            # Add other voices to dropdown
             for display_name, voice_id in english_us_voices:
                 self.voice_combo.addItem(display_name, voice_id)
             
-            # Set first voice as default
+            # Set default voice (Andrew if found, otherwise first voice)
             if self.voice_combo.count() > 0:
-                self.voice_combo.setCurrentIndex(0)
+                if default_voice_id:
+                    # Andrew is already at index 0 since we added it first
+                    self.voice_combo.setCurrentIndex(0)
+                else:
+                    # Fallback to first voice if Andrew not found
+                    self.voice_combo.setCurrentIndex(0)
             else:
                 self.voice_combo.addItem("No voices found", None)
                 
