@@ -194,10 +194,17 @@ class TextToSpeechThread(QThread):
                         current_process.nice(psutil.HIGH_PRIORITY_CLASS)
                     elif platform.system() in ['Linux', 'Darwin']:
                         # On Linux/macOS, use nice value (lower = higher priority)
+                        # Try maximum priority boost first, fallback to lower if denied
                         try:
-                            os.nice(-5)  # Higher priority (may require permissions)
+                            os.nice(-15)  # Maximum priority boost (may require permissions)
                         except (PermissionError, OSError):
-                            pass  # Continue without priority boost if denied
+                            try:
+                                os.nice(-10)  # Try medium-high priority
+                            except (PermissionError, OSError):
+                                try:
+                                    os.nice(-5)  # Try lower priority boost
+                                except (PermissionError, OSError):
+                                    pass  # Continue without priority boost if denied
                 except ImportError:
                     # psutil not available, try os.nice directly on Linux/macOS
                     if platform.system() in ['Linux', 'Darwin']:
@@ -468,7 +475,8 @@ class TextToSpeechThread(QThread):
                 
                 # Try players that support MP3 stdin streaming with speed control, prioritized by quality and latency
                 # mpv supports --speed for playback speed adjustment
-                mpv_speed_args = ['--no-video', '--no-terminal', '--audio-buffer=0.3', '--stream-buffer-size=32KB', '--cache=no', '--audio-stream-buffer=0.3', f'--speed={playback_speed:.2f}', '-']
+                # Reduced audio buffer for lower latency (0.1s instead of 0.3s)
+                mpv_speed_args = ['--no-video', '--no-terminal', '--audio-buffer=0.1', '--stream-buffer-size=16KB', '--cache=no', '--audio-stream-buffer=0.1', f'--speed={playback_speed:.2f}', '-']
                 # ffplay supports atempo filter for speed adjustment
                 ffplay_speed_filter = f'atempo={playback_speed:.2f}'
                 ffplay_speed_args = ['-autoexit', '-nodisp', '-i', 'pipe:0', '-af', ffplay_speed_filter]
@@ -519,8 +527,8 @@ class TextToSpeechThread(QThread):
                     raise Exception("No streaming audio player found. Install: sudo apt-get install mpv (recommended) or sudo apt-get install mpg123")
                 
                 # Buffered streaming: collect initial chunks, then stream while playing
-                # Reduced buffer size for lower latency (with higher CPU priority, generation is faster)
-                initial_buffer_size = 8192  # 8KB initial buffer (about 0.15-0.25 seconds of audio)
+                # Minimal buffer size for lowest latency (with higher CPU priority, generation is faster)
+                initial_buffer_size = 4096  # 4KB initial buffer (about 0.08-0.15 seconds of audio) - minimal for smooth start
                 buffer = io.BytesIO()
                 buffer_filled = False
                 player_started = False
@@ -533,16 +541,20 @@ class TextToSpeechThread(QThread):
                     
                     try:
                         # Process chunks as fast as possible with minimal delays
+                        # Start player as early as possible for lowest latency
                         async for chunk in communicate.stream():
                             if not self._is_running:
                                 break
                             if chunk["type"] == "audio":
                                 chunk_data = chunk["data"]
                                 
-                                # Fill initial buffer first
+                                # Fill initial buffer first, but start playing as soon as we have minimum data
                                 if not buffer_filled:
                                     buffer.write(chunk_data)
-                                    if buffer.tell() >= initial_buffer_size:
+                                    # Start playing as soon as we have enough data (even if buffer not full)
+                                    # This reduces latency by starting playback earlier
+                                    if buffer.tell() >= initial_buffer_size or (buffer.tell() >= 2048 and len(chunk_data) < 1024):
+                                        # Start playing if we have minimum buffer OR if this is a small chunk (likely near end of buffer fill)
                                         buffer_filled = True
                                         # Write buffered data to player immediately
                                         buffer.seek(0)
@@ -620,8 +632,18 @@ class TextToSpeechThread(QThread):
                         # Increase CPU priority for background generation thread
                         try:
                             if platform.system() in ['Linux', 'Darwin']:
-                                os.nice(-5)  # Higher priority for faster generation
-                        except (PermissionError, OSError):
+                                # Try maximum priority boost first, fallback to lower if denied
+                                try:
+                                    os.nice(-15)  # Maximum priority boost
+                                except (PermissionError, OSError):
+                                    try:
+                                        os.nice(-10)  # Try medium-high priority
+                                    except (PermissionError, OSError):
+                                        try:
+                                            os.nice(-5)  # Try lower priority boost
+                                        except (PermissionError, OSError):
+                                            pass  # Continue without priority boost if denied
+                        except Exception:
                             pass  # Continue without priority boost if denied
                         
                         async def generate_speech():
