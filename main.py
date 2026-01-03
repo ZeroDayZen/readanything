@@ -149,6 +149,27 @@ class TextToSpeechThread(QThread):
         
         return f"{rate_percent:+.0f}%"
     
+    def _clean_text_for_tts(self, text):
+        """Clean text to prevent Edge TTS from reading URLs or other unwanted content
+        Replaces URLs with readable text so only the user's actual content is read
+        """
+        import re
+        
+        # Pattern to match URLs more accurately
+        # Matches: http://, https://, www., and domain-like patterns
+        url_patterns = [
+            r'https?://[^\s<>"\'{}|\\^`\[\]]+',  # http:// or https:// URLs
+            r'www\.[^\s<>"\'{}|\\^`\[\]]+',      # www. URLs
+            r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.(?:[a-zA-Z]{2,})(?:/[^\s<>"\'{}|\\^`\[\]]*)?',  # domain.com/path
+        ]
+        
+        cleaned_text = text
+        for pattern in url_patterns:
+            # Replace URLs with "link" to prevent Edge TTS from reading them
+            cleaned_text = re.sub(pattern, 'link', cleaned_text, flags=re.IGNORECASE)
+        
+        return cleaned_text
+    
     def run(self):
         try:
             if not self._is_running:
@@ -398,6 +419,9 @@ class TextToSpeechThread(QThread):
         import io
         
         try:
+            # Clean text to remove URLs and prevent Edge TTS from reading them
+            cleaned_text = self._clean_text_for_tts(self.text)
+            
             # Convert rate to Edge TTS SSML rate percentage
             rate_percent = self._convert_rate_to_edge_tts_ssml(self.rate)
             
@@ -405,7 +429,7 @@ class TextToSpeechThread(QThread):
             # Edge TTS supports SSML prosody for rate control
             # Escape XML special characters in text
             import html
-            escaped_text = html.escape(self.text)
+            escaped_text = html.escape(cleaned_text)
             ssml_text = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"><prosody rate="{rate_percent}">{escaped_text}</prosody></speak>'
             
             if platform.system() == 'Linux':
