@@ -2218,7 +2218,7 @@ class ReadAnythingApp(QMainWindow):
             self.word_positions.append((start_pos, end_pos))
     
     def start_highlighting(self, text, rate):
-        """Start word-by-word highlighting"""
+        """Start word-by-word highlighting synchronized with TTS playback"""
         # Clear any existing highlights
         self.stop_highlighting()
         
@@ -2231,17 +2231,34 @@ class ReadAnythingApp(QMainWindow):
         # Reset to first word
         self.current_word_index = 0
         
-        # Calculate delay per word based on rate (words per minute)
-        # Average reading speed is ~150 WPM, so adjust accordingly
+        # Calculate delay per word to match actual audio playback speed
+        # The rate (WPM) is what the user wants, and audio playback speed is adjusted to achieve it
+        # Audio is played at: playback_speed = rate / 150 (e.g., 300 WPM = 2x speed)
+        # So words are spoken at the target rate, meaning highlighting should match the rate directly
         words_per_second = rate / 60.0
         delay_ms = int(1000 / words_per_second) if words_per_second > 0 else 200
-        # Add some buffer for natural pauses
-        delay_ms = max(100, min(delay_ms, 500))
         
-        # Start timer
+        # Clamp delay to reasonable range
+        delay_ms = max(50, min(delay_ms, 1000))
+        
+        # Account for initial audio playback latency
+        # There's a delay before audio actually starts (buffer fill, player startup, network latency)
+        # This varies by platform and player, so we use a reasonable estimate
+        # For pre-generated audio, latency is lower; for on-demand, it's higher
+        if platform.system() == 'Linux':
+            initial_latency_ms = 350  # Linux streaming: buffer fill + player startup
+        elif platform.system() == 'Darwin':
+            initial_latency_ms = 600  # macOS: temp file generation + afplay startup
+        else:
+            initial_latency_ms = 400  # Windows: temp file + player startup
+        
+        # Start the repeating timer for word highlighting
         self.highlight_timer.start(delay_ms)
-        # Highlight first word immediately
-        self.highlight_next_word()
+        
+        # Don't highlight first word immediately - wait for audio to actually start playing
+        # Use a one-shot timer to account for initial latency before starting highlights
+        # This ensures highlighting starts when audio actually begins, not when generation starts
+        QTimer.singleShot(initial_latency_ms, self.highlight_next_word)
     
     def highlight_next_word(self):
         """Highlight the next word in yellow"""
