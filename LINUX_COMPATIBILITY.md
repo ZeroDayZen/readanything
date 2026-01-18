@@ -6,7 +6,9 @@ The app **will work on Kali Linux** with Edge TTS (AI-powered text-to-speech).
 
 ### ✅ What Works Out of the Box
 
-- **Text-to-Speech**: Uses `edge-tts` (Microsoft Azure Neural TTS) - works on Linux
+- **Text-to-Speech**: Works on Linux using either:
+  - **System (Offline)** engine (via `pyttsx3` + your system’s TTS backend), or
+  - **Edge TTS (Online)** for higher-quality neural voices
 - **GUI Interface**: PyQt6 is fully cross-platform
 - **Word Highlighting**: Platform-independent feature
 - **Voice Selection**: All Edge TTS English US voices available in dropdown
@@ -15,7 +17,7 @@ The app **will work on Kali Linux** with Edge TTS (AI-powered text-to-speech).
 
 ### ⚠️ What Needs Setup
 
-1. **Internet Connection**: Required for first voice download (works offline after)
+1. **Internet Connection**: Required if you choose **Edge TTS (Online)** (System engine works offline)
 2. **Audio Player**: Linux needs an audio player (paplay, aplay, mpg123, or mpv)
 3. **Global Hotkey**: Platform-aware (Ctrl+Shift+R on Linux)
 
@@ -72,7 +74,7 @@ source venv/bin/activate
 python3 main.py
 ```
 
-**First Run**: On first use, Edge TTS will download voice models (one-time, ~5-10MB per voice). After that, it works completely offline!
+**Note**: Edge TTS is an online TTS option. If you need offline/private behavior, select **System (Offline)** in the app.
 
 ## Known Limitations on Linux
 
@@ -100,14 +102,12 @@ python3 main.py
 **Voice Quality**:
 - ✅ **Neural AI voices** - Natural, human-like sound
 - ✅ **No robotic sound** - Much better than traditional TTS engines
-- ✅ **Multiple options** - Choose from 20+ English US voices
-- ✅ **Offline capable** - Works offline after first download
+- ✅ **Multiple options** - Choose from many voices
+- ⚠️ **Requires internet** to generate speech
 
-**First Use**:
-- On first run, Edge TTS downloads voice models (one-time, ~5-10MB per voice)
-- Requires internet connection for initial download
-- After download, voices are cached locally and work offline
-- Cache location: `~/.cache/edge-tts/`
+**Privacy/Network**:
+- Edge TTS uses Microsoft’s service to generate audio; the text is sent to the service to synthesize speech.
+- For sensitive content, use **System (Offline)**.
 
 ### 3. Selected Text Capture
 
@@ -293,9 +293,8 @@ df -h ~/.cache/
 
 **Requirements:**
 - ✅ Python 3.8+ (usually pre-installed on Kali)
-- ✅ Internet connection (for first voice download only)
-- ✅ Audio player (paplay, mpg123, or similar)
-- ✅ Edge TTS Python package (installed via requirements.txt)
+- ✅ Audio player (paplay, mpg123, or similar) for Edge TTS audio playback
+- ✅ Internet connection if using Edge TTS
 
 **Benefits of Edge TTS on Linux:**
 - 🎯 **High-quality neural voices** - Much better than espeak/festival

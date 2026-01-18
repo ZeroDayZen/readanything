@@ -27,12 +27,26 @@ try:
 except ImportError:
     PYNPUT_AVAILABLE = False
 
-# Edge TTS (free local AI TTS from Microsoft - works offline after downloading voices)
+# Edge TTS (online TTS - not used in offline mode)
 try:
     import edge_tts
     EDGE_TTS_AVAILABLE = True
 except ImportError:
     EDGE_TTS_AVAILABLE = False
+
+# Piper TTS (fully offline neural TTS)
+PIPER_TTS_AVAILABLE = False
+try:
+    # Check if piper binary is available
+    if platform.system() == 'Windows':
+        # Windows: use 'where' command
+        result = subprocess.run(['where', 'piper'], capture_output=True, text=True, timeout=2)
+    else:
+        # Unix/Linux/macOS: use 'which' command
+        result = subprocess.run(['which', 'piper'], capture_output=True, text=True, timeout=2)
+    PIPER_TTS_AVAILABLE = (result.returncode == 0)
+except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+    PIPER_TTS_AVAILABLE = False
 
 
 class GlobalHotkeyThread(QThread):
@@ -109,7 +123,7 @@ class TextToSpeechThread(QThread):
         self.engine = engine
         self.rate = rate
         self.voice_id = voice_id
-        self.tts_engine_type = tts_engine_type  # 'default' or 'edge-tts'
+        self.tts_engine_type = tts_engine_type  # 'default', 'piper', or 'edge-tts'
         self._is_running = True
         self._process = None
         # Prevent thread from causing app to exit
@@ -216,9 +230,11 @@ class TextToSpeechThread(QThread):
                 # Any other error - continue without priority boost
                 pass
             
-            # Use Edge TTS if specified (free local AI TTS)
-            if self.tts_engine_type == 'edge-tts' and EDGE_TTS_AVAILABLE:
-                self._run_edge_tts()
+            # Fully offline TTS: system or Piper TTS
+            
+            # Use Piper TTS if specified (fully offline neural TTS)
+            if self.tts_engine_type == 'piper' and PIPER_TTS_AVAILABLE:
+                self._run_piper_tts()
                 return
             
             # On macOS, use native 'say' command to avoid event loop conflicts
@@ -450,6 +466,145 @@ class TextToSpeechThread(QThread):
                 pass
         # Don't call _cleanup_engine here - it will be called in finally block
         # This allows the thread to exit quickly
+    
+    def _run_piper_tts(self):
+        """Run TTS using Piper TTS (fully offline neural TTS)"""
+        if not PIPER_TTS_AVAILABLE:
+            raise Exception("Piper TTS not available. Install piper binary: https://github.com/rhasspy/piper")
+        
+        import tempfile
+        
+        # voice_id should be the path to the .onnx model file
+        model_path = self.voice_id if self.voice_id else None
+        if not model_path or not os.path.exists(model_path):
+            raise Exception(f"Piper voice model not found: {model_path}")
+        
+        try:
+            # Create temp file for audio output
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            # Build piper command
+            # piper --model <model_path> --output_file <output> --text "<text>"
+            cmd = ['piper', '--model', model_path, '--output_file', temp_path]
+            
+            # Add text via stdin
+            self._process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Send text to stdin
+            self._process.stdin.write(self.text)
+            self._process.stdin.close()
+            
+            # Wait for process to complete, checking if we should stop
+            while self._process.poll() is None:
+                if not self._is_running:
+                    # Stop the process
+                    self._process.terminate()
+                    self._process.wait(timeout=1)
+                    break
+                self.msleep(100)  # Check every 100ms
+            
+            # Wait for process to finish
+            if self._process.poll() is None:
+                self._process.wait()
+            
+            # Check for errors
+            if self._process.returncode != 0 and self._process.returncode != -15:  # -15 is SIGTERM
+                stderr_output = self._process.stderr.read() if self._process.stderr else ""
+                if stderr_output:
+                    raise Exception(f"piper command failed: {stderr_output}")
+            
+            # Check if output file exists
+            if not os.path.exists(temp_path):
+                raise Exception("Piper TTS did not generate audio output")
+            
+            # Play the generated audio file
+            if platform.system() == 'Darwin':
+                # macOS: use afplay with speed adjustment
+                playback_speed = self._convert_rate_to_playback_speed(self.rate)
+                # afplay doesn't support speed directly, so we'd need ffmpeg or sox
+                # For now, just play at normal speed
+                self._process = subprocess.Popen(
+                    ['afplay', temp_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+            elif platform.system() == 'Linux':
+                # Linux: try mpv, ffplay, or paplay
+                playback_speed = self._convert_rate_to_playback_speed(self.rate)
+                players = [
+                    ('mpv', ['--no-video', '--no-terminal', '--audio-buffer=0.1', f'--speed={playback_speed:.2f}', temp_path]),
+                    ('ffplay', ['-autoexit', '-nodisp', '-i', temp_path, '-af', f'atempo={playback_speed:.2f}']),
+                    ('paplay', [temp_path]),
+                ]
+                
+                for player_name, player_args in players:
+                    try:
+                        self._process = subprocess.Popen(
+                            [player_name] + player_args,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                        if self._process and self._process.poll() is None:
+                            break
+                        else:
+                            if self._process:
+                                self._process.terminate()
+                            self._process = None
+                    except FileNotFoundError:
+                        continue
+                
+                if not self._process:
+                    raise Exception("No audio player found. Install: mpv, ffplay, or paplay")
+            else:
+                # Windows: use default player
+                os.startfile(temp_path)
+                # Create dummy process for compatibility
+                self._process = type('DummyProcess', (), {
+                    'poll': lambda: None,
+                    'terminate': lambda: None,
+                    'wait': lambda timeout=None: None,
+                })()
+            
+            # Wait for playback
+            if self._process:
+                while self._process.poll() is None:
+                    if not self._is_running:
+                        self._process.terminate()
+                        try:
+                            self._process.wait(timeout=0.5)
+                        except:
+                            try:
+                                self._process.kill()
+                            except:
+                                pass
+                        break
+                    self.msleep(100)
+                
+                if self._process.poll() is None:
+                    self._process.wait()
+            
+        except Exception as e:
+            raise
+        finally:
+            # Clean up temp file
+            if 'temp_path' in locals() and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+            if self._process and hasattr(self._process, 'stdin') and self._process.stdin:
+                try:
+                    self._process.stdin.close()
+                except:
+                    pass
     
     def _run_edge_tts(self):
         """Run TTS using Edge TTS with buffered streaming for low latency and smooth playback"""
@@ -1074,6 +1229,7 @@ class ReadAnythingApp(QMainWindow):
         self.tts_thread = None
         self.engine = None
         self.voices = []  # Initialize to empty list to prevent AttributeError
+        # Fully offline: use system TTS only (no network calls)
         # Word highlighting
         self.highlight_timer = QTimer()
         self.highlight_timer.timeout.connect(self.highlight_next_word)
@@ -1090,7 +1246,6 @@ class ReadAnythingApp(QMainWindow):
         self.pregen_audio = {}  # Store pre-generated audio by text hash
         self.current_text_hash = None
         self.pregen_playback_thread = None
-        # Don't initialize pyttsx3 engine - we're using Edge TTS only
         self.init_ui()
         self.setup_global_hotkey()
         
@@ -1277,7 +1432,7 @@ class ReadAnythingApp(QMainWindow):
         
         # Status bar - show version on startup
         self.statusBar().showMessage(f"Ready - ReadAnything v{VERSION_NAME}")
-    
+
     def set_window_icon(self):
         """Set the window icon"""
         logo_path = os.path.join(os.path.dirname(__file__), 'logo_128.png')
@@ -1404,100 +1559,63 @@ class ReadAnythingApp(QMainWindow):
         
         return None
     
-    def populate_voices(self):
-        """Populate voice selection dropdown with Edge TTS voices"""
-        self.voice_combo.clear()
+    def discover_piper_voices(self):
+        """Discover available Piper TTS voice models."""
+        piper_voices = []
         
-        if not EDGE_TTS_AVAILABLE:
-            # Edge TTS not available - show error message
-            self.voice_combo.addItem("Edge TTS not installed", None)
-            QMessageBox.warning(self, "Edge TTS Required", 
-                              "Edge TTS is required for this application.\n\n"
-                              "Install with: pip install edge-tts\n\n"
-                              "Then restart the application.")
-            return
+        if not PIPER_TTS_AVAILABLE:
+            return piper_voices
         
-        # Fetch all available Edge TTS voices
-        try:
-            import asyncio
+        # Common Piper voice model locations
+        possible_paths = [
+            Path.home() / '.local' / 'share' / 'piper' / 'voices',
+            Path.home() / '.piper' / 'voices',
+            Path.home() / 'piper' / 'voices',
+            Path('/usr/local/share/piper/voices'),
+            Path('/usr/share/piper/voices'),
+        ]
+        
+        # Also check if PIPER_VOICES_PATH env var is set
+        env_path = os.environ.get('PIPER_VOICES_PATH')
+        if env_path:
+            possible_paths.insert(0, Path(env_path))
+        
+        for voices_dir in possible_paths:
+            if not voices_dir.exists():
+                continue
             
-            async def get_voices():
-                voices = await edge_tts.list_voices()
-                return voices
-            
-            # Create event loop and fetch voices
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                all_voices = loop.run_until_complete(get_voices())
-            finally:
-                loop.close()
-            
-            # Filter for English US voices and sort them
-            english_us_voices = []
-            default_voice_id = None
-            default_voice_display = None
-            
-            for voice in all_voices:
-                # Check if it's English US
-                if voice.get('Locale', '').startswith('en-US'):
-                    name = voice.get('ShortName', '')
-                    friendly_name = voice.get('FriendlyName', name)
-                    gender = voice.get('Gender', '')
-                    
+            # Look for .onnx files (Piper model files)
+            for model_file in voices_dir.rglob('*.onnx'):
+                # Get voice name from directory structure or filename
+                # Piper models are often in: language/voice/voice.onnx
+                parts = model_file.parts
+                if len(parts) >= 2:
+                    # Use parent directory name as voice identifier
+                    voice_name = parts[-2] if len(parts) > 1 else model_file.stem
                     # Create display name
-                    if gender:
-                        display_name = f"{friendly_name} ({gender})"
-                    else:
-                        display_name = friendly_name
-                    
-                    # Check if this is Microsoft Andrew Online (Natural)
-                    # Look for "Andrew" in the friendly name (case-insensitive)
-                    # Voice ID is typically "en-US-AndrewNeural" for natural voices
-                    friendly_lower = friendly_name.lower()
-                    name_lower = name.lower()
-                    if 'andrew' in friendly_lower or 'andrew' in name_lower:
-                        # Prefer Natural/Neural voices, but accept any Andrew voice
-                        if 'neural' in name_lower or 'natural' in friendly_lower or 'natural' in str(voice.get('VoiceType', '')).lower():
-                            default_voice_id = name
-                            default_voice_display = display_name
-                        elif not default_voice_id:
-                            # If we haven't found a Natural Andrew yet, use this as fallback
-                            default_voice_id = name
-                            default_voice_display = display_name
-                    else:
-                        english_us_voices.append((display_name, name))
-            
-            # Sort by display name
-            english_us_voices.sort(key=lambda x: x[0])
-            
-            # Add default voice first (Andrew) if found
-            if default_voice_id:
-                self.voice_combo.addItem(default_voice_display, default_voice_id)
-            
-            # Add other voices to dropdown
-            for display_name, voice_id in english_us_voices:
-                self.voice_combo.addItem(display_name, voice_id)
-            
-            # Set default voice (Andrew if found, otherwise first voice)
-            if self.voice_combo.count() > 0:
-                if default_voice_id:
-                    # Andrew is already at index 0 since we added it first
-                    self.voice_combo.setCurrentIndex(0)
-                else:
-                    # Fallback to first voice if Andrew not found
-                    self.voice_combo.setCurrentIndex(0)
-            else:
-                self.voice_combo.addItem("No voices found", None)
-                
-        except Exception as e:
-            print(f"Error fetching Edge TTS voices: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            self.voice_combo.addItem("Error loading voices", None)
-            QMessageBox.warning(self, "Error", 
-                              f"Failed to load Edge TTS voices:\n{str(e)}\n\n"
-                              "Make sure edge-tts is installed: pip install edge-tts")
+                    display_name = f"Piper: {voice_name}"
+                    # Store full path as voice_id
+                    piper_voices.append((display_name, str(model_file)))
+        
+        return piper_voices
+    
+    def populate_voices(self):
+        """Populate voice selection dropdown with system/offline voices and Piper TTS voices."""
+        # Ensure pyttsx3 is initialized for non-macOS so populate_voices_old can use self.engine/self.voices
+        if platform.system() != 'Darwin' and self.engine is None:
+            self.init_engine()
+        
+        # Store current selection
+        current_selection = self.voice_combo.currentIndex() if self.voice_combo.count() > 0 else -1
+        
+        # Populate system voices first
+        self.populate_voices_old()
+        
+        # Add Piper voices if available
+        if PIPER_TTS_AVAILABLE:
+            piper_voices = self.discover_piper_voices()
+            for display_name, model_path in piper_voices:
+                self.voice_combo.addItem(display_name, model_path)
     
     def populate_voices_old(self):
         """Old populate_voices method - kept for reference but not used"""
@@ -1802,25 +1920,14 @@ class ReadAnythingApp(QMainWindow):
         self.speed_label.setText(str(value))
     
     def on_text_changed(self):
-        """Called when text in text area changes - start pre-generation timer"""
-        # Stop any existing pre-generation
-        if self.pregen_thread and self.pregen_thread.isRunning():
-            self.pregen_thread.stop()
-            self.pregen_thread.wait(100)
-        
-        # Clear old pre-generated audio
-        self.pregen_audio.clear()
-        self.current_text_hash = None
-        
-        # Start timer to wait for user to stop typing (500ms delay)
-        # This prevents generating audio for every keystroke
-        self.pregen_timer.stop()
-        self.pregen_timer.start(500)  # Wait 500ms after user stops typing
+        """Called when text in text area changes"""
+        # Pre-generation disabled - fully offline operation only
+        pass
     
     def start_pre_generation(self):
-        """Start pre-generating audio in background"""
-        if not EDGE_TTS_AVAILABLE:
-            return
+        """Start pre-generating audio in background (disabled - offline only)"""
+        # Pre-generation disabled for offline-only operation
+        return
         
         text = self.text_area.toPlainText().strip()
         if not text or len(text) < 3:  # Don't pre-generate for very short text
@@ -2045,16 +2152,8 @@ class ReadAnythingApp(QMainWindow):
             # Fall through to normal generation
     
     def play_text(self):
-        """Play the text using text-to-speech (Edge TTS only)"""
+        """Play the text using offline system text-to-speech only"""
         try:
-            # Check if Edge TTS is available
-            if not EDGE_TTS_AVAILABLE:
-                QMessageBox.warning(self, "Edge TTS Not Available", 
-                                  "Edge TTS library is not installed.\n\n"
-                                  "Install with: pip install edge-tts\n\n"
-                                  "Then restart the application.")
-                return
-            
             text = self.text_area.toPlainText().strip()
             if not text:
                 QMessageBox.warning(self, "Warning", "Please enter some text")
@@ -2066,29 +2165,33 @@ class ReadAnythingApp(QMainWindow):
             
             # Get selected voice and speed
             voice_id = self.voice_combo.currentData()
-            if not voice_id:
-                QMessageBox.warning(self, "Warning", "Please select a voice")
-                return
             speed = self.speed_slider.value()
+
+            # Detect if Piper voice is selected (voice_id is a path to .onnx file)
+            is_piper_voice = voice_id and isinstance(voice_id, str) and voice_id.endswith('.onnx') and os.path.exists(voice_id)
             
-            # Check if we have pre-generated audio for this text
-            import hashlib
-            text_hash = hashlib.md5(text.encode()).hexdigest()
-            
-            if text_hash in self.pregen_audio:
-                # Use pre-generated audio for instant playback!
-                audio_data = self.pregen_audio[text_hash]
-                self._play_pre_generated_audio(audio_data, speed)
-                return
-            
-            # No pre-generated audio available - generate on demand
-            # Always use Edge TTS
-            tts_engine_type = 'edge-tts'
-            engine = None  # Not used for Edge TTS
+            if is_piper_voice:
+                # Use Piper TTS (fully offline neural TTS)
+                if not PIPER_TTS_AVAILABLE:
+                    QMessageBox.warning(self, "Piper TTS Not Available", 
+                                      "Piper TTS binary is not installed.\n\n"
+                                      "Install piper: https://github.com/rhasspy/piper\n\n"
+                                      "Or select a system voice instead.")
+                    return
+                tts_engine_type = 'piper'
+                engine = None  # Not used for Piper TTS
+            else:
+                # System/offline path - no network calls
+                if platform.system() != 'Darwin' and self.engine is None:
+                    self.init_engine()
+                if platform.system() != 'Darwin' and not self.engine:
+                    QMessageBox.warning(self, "System TTS Unavailable", "Could not initialize system TTS engine.")
+                    return
+                engine = self.engine
+                tts_engine_type = 'default'
             
             # Create and start thread
             try:
-                # Create thread object with Edge TTS engine type
                 self.tts_thread = TextToSpeechThread(text, engine, speed, voice_id, tts_engine_type)
                 
                 # Connect signals BEFORE starting thread

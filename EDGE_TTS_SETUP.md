@@ -1,18 +1,20 @@
 # Edge TTS Setup Guide
 
-ReadAnything now supports **Edge TTS** - a free, local AI-powered text-to-speech engine from Microsoft!
+ReadAnything supports **Edge TTS** - a free, high-quality text-to-speech option that uses Microsoft’s neural voices.
 
 ## What is Edge TTS?
 
-Edge TTS uses Microsoft's Azure Neural Text-to-Speech voices, which provide high-quality, natural-sounding speech. The best part? **It works completely offline** after the first voice download!
+Edge TTS uses Microsoft’s Azure Neural Text-to-Speech voices, which provide high-quality, natural-sounding speech.
+
+**Important privacy note:** Edge TTS is an **online** TTS option. When you use it, the text you submit is sent to Microsoft’s service to generate audio. If you need fully offline/private behavior, use the app’s **System (Offline)** engine instead.
 
 ## Features
 
 - ✅ **100% Free** - No API keys or paid subscriptions
-- ✅ **Offline Capable** - Works offline after initial voice download
+- ✅ **High Quality** - Neural voices with natural intonation
 - ✅ **High Quality** - Neural voices with natural intonation
 - ✅ **Multiple Voices** - 7+ English US voices to choose from
-- ✅ **Local Processing** - Your text never leaves your computer
+- ⚠️ **Internet Required** - Requires a network connection to generate speech
 
 ## Installation
 
@@ -46,18 +48,11 @@ Edge TTS uses Microsoft's Azure Neural Text-to-Speech voices, which provide high
 
 ## How It Works
 
-1. **First Use:** When you first use Edge TTS, it downloads the voice model (usually small, ~5-10MB per voice)
-2. **Subsequent Uses:** The voice is cached locally, so it works completely offline!
-3. **Privacy:** All processing happens locally - your text never leaves your computer
+Edge TTS generates audio using Microsoft’s service. The app downloads/streams the resulting audio and plays it locally.
 
 ## Offline Usage
 
-After the initial download, Edge TTS works completely offline. The voices are cached in:
-- **macOS:** `~/Library/Caches/edge-tts/`
-- **Linux:** `~/.cache/edge-tts/`
-- **Windows:** `%LOCALAPPDATA%\edge-tts\`
-
-You can use the app without an internet connection after the first use!
+If you need offline usage, select **System (Offline)** in the app’s TTS Engine dropdown. Edge TTS itself requires internet access to generate speech.
 
 ## Troubleshooting
 
@@ -97,10 +92,10 @@ Then restart the application.
 | Feature | Default (System) | Edge TTS |
 |---------|-----------------|----------|
 | **Cost** | Free | Free |
-| **Internet** | Not required | Required for first download only |
+| **Internet** | Not required | Required |
 | **Quality** | Good | Excellent (Neural AI) |
 | **Voice Options** | System voices | 7+ Neural voices |
-| **Offline** | Always | After first use |
+| **Offline** | Always | No (requires internet) |
 | **Setup** | None | Install edge-tts |
 
 ## Recommendations
@@ -120,7 +115,7 @@ Then restart the application.
 - **Voice Format:** Neural Text-to-Speech (Azure TTS)
 - **Audio Format:** MP3
 - **Cache Size:** ~5-10MB per voice
-- **Processing:** Local (your computer)
+- **Processing:** Online (Microsoft service), audio played locally
 
 ---
 

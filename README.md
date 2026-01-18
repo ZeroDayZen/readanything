@@ -17,7 +17,10 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
 ## Features
 
 - 🎤 **Text-to-Speech**: Convert any text to speech
-- ⌨️ **Global Hotkey**: Read selected text from any application with Cmd+Shift+R
+- 🔒 **Privacy by Default**: All TTS runs offline (no text is sent out)
+- 🎯 **High-Quality Offline Voices**: Supports **Piper TTS** (fully offline neural AI voices)
+- 🎛️ **Multiple Engine Support**: System voices (built-in) + Piper TTS (optional, offline neural)
+- ⌨️ **Global Hotkey**: Read selected text from any application with Cmd+Shift+R (macOS) or Ctrl+Shift+R (Linux)
 - 🎚️ **Customizable**: Adjustable speech speed and voice selection
 - 🎨 **Minimalistic Design**: Clean, easy-to-use interface
 - 🖥️ **Cross-Platform**: Works on Linux and macOS
@@ -28,6 +31,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
 - Python 3.8 or higher
 - For Linux: `espeak` or `festival` (usually pre-installed)
 - For macOS: Built-in speech synthesizer (no additional setup needed)
+- **Optional:** [Piper TTS](PIPER_TTS_SETUP.md) for high-quality offline neural voices (see setup guide)
 
 ## Installation
 
@@ -218,6 +222,7 @@ The application features a clean, minimalistic interface with:
 
 - **[INSTALL_KALI.md](INSTALL_KALI.md)** - Detailed installation guide for Kali Linux
 - **[LINUX_COMPATIBILITY.md](LINUX_COMPATIBILITY.md)** - Linux compatibility information
+- **[PIPER_TTS_SETUP.md](PIPER_TTS_SETUP.md)** - Setup guide for Piper TTS (fully offline neural voices)
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
 
 ## Troubleshooting

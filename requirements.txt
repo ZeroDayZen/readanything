@@ -7,3 +7,7 @@ edge-tts>=6.1.0
 # gTTS (free, requires internet): pip install gtts
 # OpenAI TTS (premium, requires API key): pip install openai
 
+# Piper TTS (fully offline neural TTS - optional, install separately)
+# Install piper binary: https://github.com/rhasspy/piper
+# Download voice models: https://github.com/rhasspy/piper/releases
+# Piper provides high-quality offline neural voices - fully local, no network calls
