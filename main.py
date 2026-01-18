@@ -27,13 +27,6 @@ try:
 except ImportError:
     PYNPUT_AVAILABLE = False
 
-# Edge TTS (online TTS - not used in offline mode)
-try:
-    import edge_tts
-    EDGE_TTS_AVAILABLE = True
-except ImportError:
-    EDGE_TTS_AVAILABLE = False
-
 # Piper TTS (fully offline neural TTS)
 PIPER_TTS_AVAILABLE = False
 try:
@@ -123,7 +116,7 @@ class TextToSpeechThread(QThread):
         self.engine = engine
         self.rate = rate
         self.voice_id = voice_id
-        self.tts_engine_type = tts_engine_type  # 'default', 'piper', or 'edge-tts'
+        self.tts_engine_type = tts_engine_type  # 'default' or 'piper'
         self._is_running = True
         self._process = None
         # Prevent thread from causing app to exit
@@ -510,11 +503,11 @@ class TextToSpeechThread(QThread):
                     self._process.wait(timeout=1)
                     break
                 self.msleep(100)  # Check every 100ms
-            
+                    
             # Wait for process to finish
             if self._process.poll() is None:
                 self._process.wait()
-            
+                        
             # Check for errors
             if self._process.returncode != 0 and self._process.returncode != -15:  # -15 is SIGTERM
                 stderr_output = self._process.stderr.read() if self._process.stderr else ""
@@ -575,652 +568,36 @@ class TextToSpeechThread(QThread):
             
             # Wait for playback
             if self._process:
-                while self._process.poll() is None:
-                    if not self._is_running:
-                        self._process.terminate()
-                        try:
-                            self._process.wait(timeout=0.5)
-                        except:
+                    while self._process.poll() is None:
+                        if not self._is_running:
+                            self._process.terminate()
                             try:
-                                self._process.kill()
+                                self._process.wait(timeout=0.5)
                             except:
-                                pass
-                        break
-                    self.msleep(100)
+                                try:
+                                    self._process.kill()
+                                except:
+                                    pass
+                            break
+                        self.msleep(100)
+                    
+                    if self._process.poll() is None:
+                        self._process.wait()
                 
-                if self._process.poll() is None:
-                    self._process.wait()
-            
         except Exception as e:
             raise
         finally:
             # Clean up temp file
             if 'temp_path' in locals() and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
             if self._process and hasattr(self._process, 'stdin') and self._process.stdin:
                 try:
-                    self._process.stdin.close()
-                except:
-                    pass
-    
-    def _run_edge_tts(self):
-        """Run TTS using Edge TTS with buffered streaming for low latency and smooth playback"""
-        if not EDGE_TTS_AVAILABLE:
-            raise Exception("Edge TTS library not available. Install with: pip install edge-tts")
-        
-        import asyncio
-        import io
-        
-        try:
-            # Clean text to remove URLs and prevent Edge TTS from reading them
-            cleaned_text = self._clean_text_for_tts(self.text)
-            
-            # Convert rate to playback speed multiplier for audio player
-            playback_speed = self._convert_rate_to_playback_speed(self.rate)
-            
-            # Use plain text (no SSML) - Edge TTS doesn't properly support SSML
-            # Rate control will be handled through audio playback speed adjustment
-            
-            if platform.system() == 'Linux':
-                # Linux - use buffered streaming for low latency and smooth playback
-                # Strategy: Buffer initial chunks, then start player and continue streaming
-                
-                # Try players that support MP3 stdin streaming with speed control, prioritized by quality and latency
-                # mpv supports --speed for playback speed adjustment
-                # Reduced audio buffer for lower latency (0.1s instead of 0.3s)
-                mpv_speed_args = ['--no-video', '--no-terminal', '--audio-buffer=0.1', '--stream-buffer-size=16KB', '--cache=no', '--audio-stream-buffer=0.1', f'--speed={playback_speed:.2f}', '-']
-                # ffplay supports atempo filter for speed adjustment
-                ffplay_speed_filter = f'atempo={playback_speed:.2f}'
-                ffplay_speed_args = ['-autoexit', '-nodisp', '-i', 'pipe:0', '-af', ffplay_speed_filter]
-                
-                players = [
-                    # mpv - best quality, low latency, supports speed adjustment
-                    ('mpv', mpv_speed_args),
-                    # ffplay - fallback, supports speed via atempo filter
-                    ('ffplay', ffplay_speed_args),
-                    # mpg123 - no speed control, but very low latency (fallback only)
-                    ('mpg123', ['-q', '--stereo', '--buffer', '16384', '-']),
-                ]
-                
-                self._process = None
-                selected_player = None
-                
-                for player_name, player_args in players:
-                    try:
-                        # Start player with stdin
-                        self._process = subprocess.Popen(
-                            [player_name] + player_args,
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            bufsize=0  # Unbuffered for immediate writes
-                        )
-                        # Test if process started successfully
-                        if self._process and self._process.poll() is None:
-                            selected_player = player_name
-                            break  # Successfully started
-                        else:
-                            if self._process:
-                                self._process.terminate()
-                            self._process = None
-                    except FileNotFoundError:
-                        continue
-                    except Exception as e:
-                        print(f"Error starting {player_name}: {e}", file=sys.stderr)
-                        if self._process:
-                            try:
-                                self._process.terminate()
-                            except:
-                                pass
-                        self._process = None
-                        continue
-                
-                if not self._process or not selected_player:
-                    raise Exception("No streaming audio player found. Install: sudo apt-get install mpv (recommended) or sudo apt-get install mpg123")
-                
-                # Buffered streaming: collect initial chunks, then stream while playing
-                # Minimal buffer size for lowest latency (with higher CPU priority, generation is faster)
-                initial_buffer_size = 4096  # 4KB initial buffer (about 0.08-0.15 seconds of audio) - minimal for smooth start
-                buffer = io.BytesIO()
-                buffer_filled = False
-                player_started = False
-                
-                async def stream_with_buffering():
-                    nonlocal buffer_filled, player_started
-                    # Use plain text (no SSML) - Edge TTS will read this directly
-                    # Create communicate object with optimized settings
-                    communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                    stream = None
-                    
-                    try:
-                        # Get the async generator
-                        stream = communicate.stream()
-                        
-                        # Process chunks as fast as possible with minimal delays
-                        # Start player as early as possible for lowest latency
-                        async for chunk in stream:
-                            if not self._is_running:
-                                break
-                            if chunk["type"] == "audio":
-                                chunk_data = chunk["data"]
-                                
-                                # Fill initial buffer first, but start playing as soon as we have minimum data
-                                if not buffer_filled:
-                                    buffer.write(chunk_data)
-                                    # Start playing as soon as we have enough data (even if buffer not full)
-                                    # This reduces latency by starting playback earlier
-                                    if buffer.tell() >= initial_buffer_size or (buffer.tell() >= 2048 and len(chunk_data) < 1024):
-                                        # Start playing if we have minimum buffer OR if this is a small chunk (likely near end of buffer fill)
-                                        buffer_filled = True
-                                        # Write buffered data to player immediately
-                                        buffer.seek(0)
-                                        if self._process and self._process.stdin:
-                                            self._process.stdin.write(buffer.read())
-                                            self._process.stdin.flush()
-                                        buffer.close()
-                                        player_started = True
-                                else:
-                                    # Stream directly to player with immediate flush for low latency
-                                    if self._process and self._process.stdin:
-                                        try:
-                                            self._process.stdin.write(chunk_data)
-                                            self._process.stdin.flush()  # Immediate flush for lower latency
-                                        except (BrokenPipeError, OSError):
-                                            # Player closed or exited
-                                            break
-                        
-                        # Close stdin when done
-                        if self._process and self._process.stdin:
-                            self._process.stdin.close()
-                    except Exception as e:
-                        print(f"Error streaming audio: {e}", file=sys.stderr)
-                        if self._process and self._process.stdin:
-                            try:
-                                self._process.stdin.close()
-                            except:
-                                pass
-                        raise
-                    finally:
-                        # Properly close the async generator to prevent resource leaks
-                        if stream is not None:
-                            try:
-                                await stream.aclose()
-                            except Exception:
-                                pass
-                        # Close the communicate object's session if it has one
-                        if hasattr(communicate, '_session') and communicate._session:
-                            try:
-                                await communicate._session.close()
-                            except Exception:
-                                pass
-                
-                # Run streaming in event loop with optimized settings for faster processing
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                # Use selector event loop for better performance (default on most systems)
-                # This allows better CPU utilization for async operations
-                try:
-                    # Run with optimized settings
-                    loop.run_until_complete(stream_with_buffering())
-                finally:
-                    # Cancel all pending tasks before closing the loop
-                    try:
-                        # Get all pending tasks
-                        pending = asyncio.all_tasks(loop)
-                        if pending:
-                            # Cancel all pending tasks
-                            for task in pending:
-                                task.cancel()
-                            # Wait for cancellations to complete (with timeout)
-                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    except Exception:
-                        pass
-                    # Close the loop properly
-                    try:
-                        loop.close()
-                    except Exception:
-                        pass
-                
-                # Wait for playback to complete
-                if self._process:
-                    while self._process.poll() is None:
-                        if not self._is_running:
-                            self._process.terminate()
-                            try:
-                                self._process.wait(timeout=0.5)
-                            except:
-                                try:
-                                    self._process.kill()
-                                except:
-                                    pass
-                            break
-                        self.msleep(100)
-                    
-                    if self._process.poll() is None:
-                        self._process.wait()
-                        
-            elif platform.system() == 'Darwin':
-                # macOS - use temp file (afplay doesn't support stdin well)
-                # But generate in background thread for faster perceived response
-                import tempfile
-                import threading
-                
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-                temp_path = temp_file.name
-                temp_file.close()
-                
-                generation_complete = threading.Event()
-                generation_error = [None]
-                
-                def generate_in_background():
-                    try:
-                        # Increase CPU priority for background generation thread
-                        try:
-                            if platform.system() in ['Linux', 'Darwin']:
-                                # Try maximum priority boost first, fallback to lower if denied
-                                try:
-                                    os.nice(-15)  # Maximum priority boost
-                                except (PermissionError, OSError):
-                                    try:
-                                        os.nice(-10)  # Try medium-high priority
-                                    except (PermissionError, OSError):
-                                        try:
-                                            os.nice(-5)  # Try lower priority boost
-                                        except (PermissionError, OSError):
-                                            pass  # Continue without priority boost if denied
-                        except Exception:
-                            pass  # Continue without priority boost if denied
-                        
-                        async def generate_speech():
-                            # Use plain text (no SSML) - Edge TTS will read this directly
-                            communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                            stream = None
-                            try:
-                                stream = communicate.stream()
-                                with open(temp_path, 'wb') as f:
-                                    async for chunk in stream:
-                                        if chunk["type"] == "audio":
-                                            f.write(chunk["data"])
-                            finally:
-                                # Properly close the async generator
-                                if stream is not None:
-                                    try:
-                                        await stream.aclose()
-                                    except Exception:
-                                        pass
-                                # Close the communicate object's session if it has one
-                                if hasattr(communicate, '_session') and communicate._session:
-                                    try:
-                                        await communicate._session.close()
-                                    except Exception:
-                                        pass
-                        
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(generate_speech())
-                        finally:
-                            # Cancel all pending tasks before closing
-                            try:
-                                pending = asyncio.all_tasks(loop)
-                                if pending:
-                                    for task in pending:
-                                        task.cancel()
-                                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                            except Exception:
-                                pass
-                            try:
-                                loop.close()
-                            except Exception:
-                                pass
-                        generation_complete.set()
-                    except Exception as e:
-                        generation_error[0] = e
-                        generation_complete.set()
-                
-                # Start generation in background
-                gen_thread = threading.Thread(target=generate_in_background, daemon=True)
-                gen_thread.start()
-                
-                # Wait for generation (with timeout)
-                generation_complete.wait(timeout=30)  # 30 second timeout
-                
-                if generation_error[0]:
-                    raise generation_error[0]
-                
-                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                    raise Exception("Edge TTS did not generate audio output")
-                
-                # Start playback with speed adjustment
-                # afplay doesn't support speed, so we'll use ffplay if available, otherwise normal speed
-                try:
-                    # Try ffplay for speed adjustment (if available)
-                    result = subprocess.run(['which', 'ffplay'], capture_output=True, timeout=1)
-                    if result.returncode == 0:
-                        # Use ffplay with speed adjustment via atempo filter
-                        ffplay_speed_filter = f'atempo={playback_speed:.2f}'
-                        self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', temp_path, '-af', ffplay_speed_filter])
-                    else:
-                        # Fallback to afplay at normal speed (no speed control on macOS without ffplay)
-                        self._process = subprocess.Popen(['afplay', temp_path])
-                except:
-                    # Fallback to afplay at normal speed
-                    self._process = subprocess.Popen(['afplay', temp_path])
-                
-                # Wait for playback
-                if self._process:
-                    while self._process.poll() is None:
-                        if not self._is_running:
-                            self._process.terminate()
-                            try:
-                                self._process.wait(timeout=0.5)
-                            except:
-                                try:
-                                    self._process.kill()
-                                except:
-                                    pass
-                            break
-                        self.msleep(100)
-                    
-                    if self._process.poll() is None:
-                        self._process.wait()
-                
-                # Cleanup
-                if os.path.exists(temp_path):
-                    try:
-                        os.unlink(temp_path)
-                    except:
-                        pass
-            else:
-                # Windows - use temp file approach
-                import tempfile
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-                temp_path = temp_file.name
-                temp_file.close()
-                
-                async def generate_speech():
-                    # Use plain text (no SSML) - Edge TTS will read this directly
-                    communicate = edge_tts.Communicate(text=cleaned_text, voice=self.voice_id if self.voice_id else "en-US-AriaNeural")
-                    stream = None
-                    try:
-                        stream = communicate.stream()
-                        with open(temp_path, 'wb') as f:
-                            async for chunk in stream:
-                                if chunk["type"] == "audio":
-                                    f.write(chunk["data"])
-                    finally:
-                        # Properly close the async generator
-                        if stream is not None:
-                            try:
-                                await stream.aclose()
-                            except Exception:
-                                pass
-                        # Close the communicate object's session if it has one
-                        if hasattr(communicate, '_session') and communicate._session:
-                            try:
-                                await communicate._session.close()
-                            except Exception:
-                                pass
-                
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(generate_speech())
-                finally:
-                    # Cancel all pending tasks before closing
-                    try:
-                        pending = asyncio.all_tasks(loop)
-                        if pending:
-                            for task in pending:
-                                task.cancel()
-                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    except Exception:
-                        pass
-                    try:
-                        loop.close()
-                    except Exception:
-                        pass
-                
-                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                    raise Exception("Edge TTS did not generate audio output")
-                
-                # Windows - use ffplay with speed adjustment if available, otherwise default player
-                # Use os.startfile() instead of shell=True for security
-                try:
-                    # Try to find ffplay without using shell
-                    ffplay_path = None
-                    # Check common locations for ffplay
-                    common_paths = [
-                        r'C:\ffmpeg\bin\ffplay.exe',
-                        r'C:\Program Files\ffmpeg\bin\ffplay.exe',
-                        r'C:\Program Files (x86)\ffmpeg\bin\ffplay.exe',
-                    ]
-                    # Also try using 'where' command without shell
-                    try:
-                        result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, text=True)
-                        if result.returncode == 0 and result.stdout.strip():
-                            ffplay_path = result.stdout.strip().split('\n')[0]
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        pass
-                    
-                    # Check common paths
-                    if not ffplay_path:
-                        for path in common_paths:
-                            if os.path.exists(path):
-                                ffplay_path = path
-                                break
-                    
-                    if ffplay_path:
-                        # Use ffplay with speed adjustment
-                        ffplay_speed_filter = f'atempo={playback_speed:.2f}'
-                        self._process = subprocess.Popen([ffplay_path, '-autoexit', '-nodisp', '-i', temp_path, '-af', ffplay_speed_filter])
-                    else:
-                        # Use os.startfile() - safer than shell=True, opens with default player
-                        # Note: os.startfile() doesn't return a process object, so we can't track it
-                        # For tracking, we'll use a minimal subprocess approach
-                        os.startfile(temp_path)
-                        # Create a dummy process object for compatibility
-                        # Since os.startfile() doesn't block, we'll use a wait thread
-                        import threading
-                        def wait_for_file_deletion():
-                            # Wait a bit then check if file still exists (rough playback detection)
-                            import time
-                            time.sleep(0.5)
-                            # Estimate playback time based on file size (rough estimate)
-                            if os.path.exists(temp_path):
-                                file_size = os.path.getsize(temp_path)
-                                # Rough estimate: 1MB ≈ 1 minute of audio
-                                estimated_seconds = max(1, file_size / (1024 * 1024) * 60)
-                                time.sleep(estimated_seconds)
-                        
-                        wait_thread = threading.Thread(target=wait_for_file_deletion, daemon=True)
-                        wait_thread.start()
-                        # Create a dummy process for compatibility with stop() method
-                        self._process = type('DummyProcess', (), {
-                            'poll': lambda: None,
-                            'terminate': lambda: None,
-                            'wait': lambda timeout=None: None,
-                        })()
-                except Exception as e:
-                    # Fallback to os.startfile() - safest option
-                    try:
-                        os.startfile(temp_path)
-                        # Create dummy process for compatibility
-                        self._process = type('DummyProcess', (), {
-                            'poll': lambda: None,
-                            'terminate': lambda: None,
-                            'wait': lambda timeout=None: None,
-                        })()
-                    except Exception:
-                        raise Exception("Could not play audio file on Windows")
-                
-                # Wait for playback
-                if self._process:
-                    while self._process.poll() is None:
-                        if not self._is_running:
-                            self._process.terminate()
-                            try:
-                                self._process.wait(timeout=0.5)
-                            except:
-                                try:
-                                    self._process.kill()
-                                except:
-                                    pass
-                            break
-                        self.msleep(100)
-                    
-                    if self._process.poll() is None:
-                        self._process.wait()
-                
-                # Cleanup
-                if os.path.exists(temp_path):
-                    try:
-                        os.unlink(temp_path)
-                    except:
-                        pass
-                    
-        except Exception as e:
-            # Clean up process on error
-            if self._process:
-                try:
-                    if hasattr(self._process, 'stdin') and self._process.stdin:
                         self._process.stdin.close()
                 except:
                     pass
-                try:
-                    self._process.terminate()
-                except:
-                    pass
-            raise
-
-
-class AudioPreGeneratorThread(QThread):
-    """Background thread to pre-generate audio while user is typing"""
-    audio_ready = pyqtSignal(str, bytes)  # Emits (text_hash, audio_data) when ready
-    
-    def __init__(self, text, voice_id):
-        super().__init__()
-        self.text = text
-        self.voice_id = voice_id
-        self._is_running = True
-        self._text_hash = None
-    
-    def _clean_text_for_tts(self, text):
-        """Clean text to remove URLs (same as TextToSpeechThread)"""
-        import re
-        url_patterns = [
-            r'https?://[^\s<>"\'{}|\\^`\[\]]+',
-            r'www\.[^\s<>"\'{}|\\^`\[\]]+',
-            r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.(?:[a-zA-Z]{2,})(?:/[^\s<>"\'{}|\\^`\[\]]*)?',
-        ]
-        cleaned_text = text
-        for pattern in url_patterns:
-            cleaned_text = re.sub(pattern, 'link', cleaned_text, flags=re.IGNORECASE)
-        return cleaned_text
-    
-    def run(self):
-        """Pre-generate audio in background"""
-        if not EDGE_TTS_AVAILABLE:
-            return
-        
-        try:
-            # Set higher thread priority for faster generation
-            try:
-                self.setPriority(QThread.Priority.HighPriority)
-            except Exception:
-                pass
-            
-            # Increase CPU priority
-            try:
-                if platform.system() in ['Linux', 'Darwin']:
-                    try:
-                        os.nice(-15)
-                    except (PermissionError, OSError):
-                        try:
-                            os.nice(-10)
-                        except (PermissionError, OSError):
-                            try:
-                                os.nice(-5)
-                            except (PermissionError, OSError):
-                                pass
-            except Exception:
-                pass
-            
-            # Create hash of text to identify this generation
-            import hashlib
-            self._text_hash = hashlib.md5(self.text.encode()).hexdigest()
-            
-            # Clean text
-            cleaned_text = self._clean_text_for_tts(self.text)
-            
-            # Generate audio
-            import asyncio
-            
-            async def generate_audio():
-                communicate = edge_tts.Communicate(
-                    text=cleaned_text, 
-                    voice=self.voice_id if self.voice_id else "en-US-AriaNeural"
-                )
-                stream = None
-                try:
-                    stream = communicate.stream()
-                    audio_chunks = []
-                    
-                    async for chunk in stream:
-                        if not self._is_running:
-                            return None
-                        if chunk["type"] == "audio":
-                            audio_chunks.append(chunk["data"])
-                    
-                    # Combine all chunks
-                    if audio_chunks:
-                        audio_data = b''.join(audio_chunks)
-                        return audio_data
-                    return None
-                finally:
-                    # Properly close the async generator
-                    if stream is not None:
-                        try:
-                            await stream.aclose()
-                        except Exception:
-                            pass
-                    # Close the communicate object's session if it has one
-                    if hasattr(communicate, '_session') and communicate._session:
-                        try:
-                            await communicate._session.close()
-                        except Exception:
-                            pass
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                audio_data = loop.run_until_complete(generate_audio())
-                if audio_data and self._is_running:
-                    # Emit signal with text hash and audio data
-                    self.audio_ready.emit(self._text_hash, audio_data)
-            finally:
-                # Cancel all pending tasks before closing
-                try:
-                    pending = asyncio.all_tasks(loop)
-                    if pending:
-                        for task in pending:
-                            task.cancel()
-                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                except Exception:
-                    pass
-                try:
-                    loop.close()
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"Pre-generation error: {e}", file=sys.stderr)
-    
-    def stop(self):
-        """Stop pre-generation"""
-        self._is_running = False
 
 
 class ReadAnythingApp(QMainWindow):
@@ -1238,14 +615,6 @@ class ReadAnythingApp(QMainWindow):
         self.original_format = QTextCharFormat()
         # Global hotkey
         self.hotkey_thread = None
-        # Pre-generation for faster playback
-        self.pregen_thread = None
-        self.pregen_timer = QTimer()
-        self.pregen_timer.setSingleShot(True)
-        self.pregen_timer.timeout.connect(self.start_pre_generation)
-        self.pregen_audio = {}  # Store pre-generated audio by text hash
-        self.current_text_hash = None
-        self.pregen_playback_thread = None
         self.init_ui()
         self.setup_global_hotkey()
         
@@ -1338,8 +707,6 @@ class ReadAnythingApp(QMainWindow):
         self.text_area.setPlaceholderText("Type or paste your text here...")
         self.text_area.setFont(QFont("Arial", 12))
         self.text_area.setStyleSheet("background-color: white; color: black;")
-        # Connect text change signal to start pre-generation
-        self.text_area.textChanged.connect(self.on_text_changed)
         layout.addWidget(self.text_area)
         
         # Controls section
@@ -1432,7 +799,7 @@ class ReadAnythingApp(QMainWindow):
         
         # Status bar - show version on startup
         self.statusBar().showMessage(f"Ready - ReadAnything v{VERSION_NAME}")
-
+    
     def set_window_icon(self):
         """Set the window icon"""
         logo_path = os.path.join(os.path.dirname(__file__), 'logo_128.png')
@@ -1919,238 +1286,6 @@ class ReadAnythingApp(QMainWindow):
         """Update speed label when slider changes"""
         self.speed_label.setText(str(value))
     
-    def on_text_changed(self):
-        """Called when text in text area changes"""
-        # Pre-generation disabled - fully offline operation only
-        pass
-    
-    def start_pre_generation(self):
-        """Start pre-generating audio in background (disabled - offline only)"""
-        # Pre-generation disabled for offline-only operation
-        return
-        
-        text = self.text_area.toPlainText().strip()
-        if not text or len(text) < 3:  # Don't pre-generate for very short text
-            return
-        
-        # Get current voice
-        voice_id = self.voice_combo.currentData()
-        if not voice_id:
-            return
-        
-        # Stop any existing pre-generation
-        if self.pregen_thread and self.pregen_thread.isRunning():
-            self.pregen_thread.stop()
-            self.pregen_thread.wait(100)
-        
-        # Create hash of current text
-        import hashlib
-        self.current_text_hash = hashlib.md5(text.encode()).hexdigest()
-        
-        # Check if we already have this audio pre-generated
-        if self.current_text_hash in self.pregen_audio:
-            return  # Already generated
-        
-        # Start pre-generation thread
-        self.pregen_thread = AudioPreGeneratorThread(text, voice_id)
-        self.pregen_thread.audio_ready.connect(self.on_audio_ready)
-        self.pregen_thread.start()
-    
-    def on_audio_ready(self, text_hash, audio_data):
-        """Called when pre-generated audio is ready"""
-        # Store pre-generated audio
-        self.pregen_audio[text_hash] = audio_data
-        # Update status to show audio is ready
-        if text_hash == self.current_text_hash:
-            self.statusBar().showMessage("Audio ready - click Play to start")
-    
-    def _play_pre_generated_audio(self, audio_data, speed):
-        """Play pre-generated audio data immediately"""
-        import tempfile
-        
-        try:
-            # Convert rate to playback speed multiplier (same logic as TextToSpeechThread)
-            if speed < 50:
-                speed = 50
-            elif speed > 300:
-                speed = 300
-            baseline_wpm = 150
-            playback_speed = speed / baseline_wpm
-            playback_speed = max(0.3, min(2.5, playback_speed))
-            
-            # Write audio data to temp file
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            temp_path = temp_file.name
-            temp_file.write(audio_data)
-            temp_file.close()
-            
-            # Get text for highlighting
-            text = self.text_area.toPlainText().strip()
-            
-            # Create a simple thread to handle playback (similar to TextToSpeechThread)
-            # This allows us to track the process and stop it if needed
-            class PreGenPlaybackThread(QThread):
-                finished = pyqtSignal()
-                
-                def __init__(self, temp_path, playback_speed, parent):
-                    super().__init__()
-                    self.temp_path = temp_path
-                    self.playback_speed = playback_speed
-                    self.parent = parent
-                    self._process = None
-                
-                def run(self):
-                    try:
-                        # Play audio with platform-specific players
-                        if platform.system() == 'Linux':
-                            players = [
-                                ('mpv', ['--no-video', '--no-terminal', '--audio-buffer=0.1', f'--speed={self.playback_speed:.2f}', self.temp_path]),
-                                ('ffplay', ['-autoexit', '-nodisp', '-i', self.temp_path, '-af', f'atempo={self.playback_speed:.2f}']),
-                                ('paplay', [self.temp_path]),
-                            ]
-                            
-                            for player_name, player_args in players:
-                                try:
-                                    self._process = subprocess.Popen(
-                                        [player_name] + player_args,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE
-                                    )
-                                    if self._process and self._process.poll() is None:
-                                        break
-                                    else:
-                                        if self._process:
-                                            self._process.terminate()
-                                        self._process = None
-                                except FileNotFoundError:
-                                    continue
-                                except Exception:
-                                    if self._process:
-                                        try:
-                                            self._process.terminate()
-                                        except:
-                                            pass
-                                    self._process = None
-                                    continue
-                            
-                            if not self._process:
-                                raise Exception("No audio player found")
-                                
-                        elif platform.system() == 'Darwin':
-                            try:
-                                result = subprocess.run(['which', 'ffplay'], capture_output=True, timeout=1)
-                                if result.returncode == 0:
-                                    ffplay_speed_filter = f'atempo={self.playback_speed:.2f}'
-                                    self._process = subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-i', self.temp_path, '-af', ffplay_speed_filter])
-                                else:
-                                    self._process = subprocess.Popen(['afplay', self.temp_path])
-                            except:
-                                self._process = subprocess.Popen(['afplay', self.temp_path])
-                        else:
-                            # Windows - use os.startfile() instead of shell=True for security
-                            try:
-                                # Try to find ffplay without using shell
-                                ffplay_path = None
-                                # Check common locations for ffplay
-                                common_paths = [
-                                    r'C:\ffmpeg\bin\ffplay.exe',
-                                    r'C:\Program Files\ffmpeg\bin\ffplay.exe',
-                                    r'C:\Program Files (x86)\ffmpeg\bin\ffplay.exe',
-                                ]
-                                # Also try using 'where' command without shell
-                                try:
-                                    result = subprocess.run(['where', 'ffplay'], capture_output=True, timeout=1, text=True)
-                                    if result.returncode == 0 and result.stdout.strip():
-                                        ffplay_path = result.stdout.strip().split('\n')[0]
-                                except (FileNotFoundError, subprocess.TimeoutExpired):
-                                    pass
-                                
-                                # Check common paths
-                                if not ffplay_path:
-                                    for path in common_paths:
-                                        if os.path.exists(path):
-                                            ffplay_path = path
-                                            break
-                                
-                                if ffplay_path:
-                                    # Use ffplay with speed adjustment
-                                    ffplay_speed_filter = f'atempo={self.playback_speed:.2f}'
-                                    self._process = subprocess.Popen([ffplay_path, '-autoexit', '-nodisp', '-i', self.temp_path, '-af', ffplay_speed_filter])
-                                else:
-                                    # Use os.startfile() - safer than shell=True
-                                    os.startfile(self.temp_path)
-                                    # Create dummy process for compatibility
-                                    self._process = type('DummyProcess', (), {
-                                        'poll': lambda: None,
-                                        'terminate': lambda: None,
-                                        'wait': lambda timeout=None: None,
-                                    })()
-                            except Exception:
-                                # Fallback to os.startfile()
-                                try:
-                                    os.startfile(self.temp_path)
-                                    # Create dummy process for compatibility
-                                    self._process = type('DummyProcess', (), {
-                                        'poll': lambda: None,
-                                        'terminate': lambda: None,
-                                        'wait': lambda timeout=None: None,
-                                    })()
-                                except Exception:
-                                    raise Exception("Could not play audio file on Windows")
-                        
-                        # Wait for playback
-                        if self._process:
-                            self._process.wait()
-                    except Exception as e:
-                        print(f"Error in pre-generated playback: {e}", file=sys.stderr)
-                    finally:
-                        # Cleanup temp file
-                        if os.path.exists(self.temp_path):
-                            try:
-                                os.unlink(self.temp_path)
-                            except:
-                                pass
-                        self.finished.emit()
-                
-                def stop(self):
-                    if self._process:
-                        try:
-                            self._process.terminate()
-                            self._process.wait(timeout=0.5)
-                        except:
-                            try:
-                                self._process.kill()
-                            except:
-                                pass
-            
-            # Create and start playback thread
-            self.pregen_playback_thread = PreGenPlaybackThread(temp_path, playback_speed, self)
-            self.pregen_playback_thread.finished.connect(self.on_speech_finished)
-            
-            # Store process reference for stopping
-            self._pregen_process = self.pregen_playback_thread._process
-            
-            # Start word highlighting
-            self.start_highlighting(text, speed)
-            
-            # Update UI
-            self.play_btn.setEnabled(False)
-            self.statusBar().showMessage("Playing (pre-generated)...")
-            
-            # Start playback thread
-            self.pregen_playback_thread.start()
-            
-        except Exception as e:
-            # Fallback to normal generation if pre-generated playback fails
-            print(f"Error playing pre-generated audio: {e}", file=sys.stderr)
-            # Clean up temp file
-            if 'temp_path' in locals() and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-            # Fall through to normal generation
-    
     def play_text(self):
         """Play the text using offline system text-to-speech only"""
         try:
@@ -2166,7 +1301,7 @@ class ReadAnythingApp(QMainWindow):
             # Get selected voice and speed
             voice_id = self.voice_combo.currentData()
             speed = self.speed_slider.value()
-
+            
             # Detect if Piper voice is selected (voice_id is a path to .onnx file)
             is_piper_voice = voice_id and isinstance(voice_id, str) and voice_id.endswith('.onnx') and os.path.exists(voice_id)
             
@@ -2265,11 +1400,6 @@ class ReadAnythingApp(QMainWindow):
             self.tts_thread.stop()
             # Wait with timeout to avoid hanging
             self.tts_thread.wait(100)  # Wait max 100ms for thread to stop
-        
-        # Stop pre-generated playback thread if running
-        if hasattr(self, 'pregen_playback_thread') and self.pregen_playback_thread and self.pregen_playback_thread.isRunning():
-            self.pregen_playback_thread.stop()
-            self.pregen_playback_thread.wait(100)
         
         # Also stop the main engine if it exists (for redundancy)
         if self.engine:

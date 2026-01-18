@@ -1,11 +1,6 @@
 PyQt6>=6.6.1
 pyttsx3==2.90
 pynput>=1.7.6
-edge-tts>=6.1.0
-
-# Optional AI TTS libraries (install separately if desired)
-# gTTS (free, requires internet): pip install gtts
-# OpenAI TTS (premium, requires API key): pip install openai
 
 # Piper TTS (fully offline neural TTS - optional, install separately)
 # Install piper binary: https://github.com/rhasspy/piper
