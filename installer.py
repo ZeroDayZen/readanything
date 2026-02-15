@@ -11,6 +11,7 @@ import json
 import tarfile
 import tempfile
 import urllib.request
+import shutil
 from pathlib import Path
 
 try:
@@ -140,7 +141,7 @@ class InstallThread(QThread):
                     self.progress.emit(f"Downloading Piper… {pct}%")
 
     def install_piper(self):
-        """Download and install Piper binary to a known location (Linux)."""
+        """Download and install Piper runtime (binary + libs) to a known location (Linux)."""
         if platform.system() != "Linux":
             self.finished.emit(False, "Piper install step is currently supported on Linux only.")
             return
@@ -149,7 +150,8 @@ class InstallThread(QThread):
         self.progress.emit(f"Detecting system architecture… ({arch})")
 
         # Install location (known, user-writable)
-        bin_dir = self._xdg_data_home() / "readanything" / "bin"
+        runtime_dir = self._xdg_data_home() / "readanything" / "piper"
+        bin_dir = runtime_dir / "bin"
         piper_dest = bin_dir / "piper"
         bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -217,19 +219,78 @@ class InstallThread(QThread):
                 self.finished.emit(False, "Could not locate `piper` executable inside the downloaded archive.")
                 return
 
-            # Install to destination
+            # Find a runtime root that contains the expected lib directory
+            # We want to preserve the layout so rpath like $ORIGIN/../lib keeps working.
+            runtime_root = None
+            cur = piper_found.parent
+            # Walk upward until temp root, looking for a sibling 'lib' directory containing libpiper_phonemize
+            while True:
+                lib_dir = cur / "lib"
+                try:
+                    if lib_dir.exists():
+                        # Look for the missing dependency from the error report
+                        matches = list(lib_dir.glob("libpiper_phonemize.so*"))
+                        if matches:
+                            runtime_root = cur
+                            break
+                except Exception:
+                    pass
+
+                if cur == td_path or cur.parent == cur:
+                    break
+                cur = cur.parent
+
+            # Fallback: try to find any libpiper_phonemize under extracted tree
+            if runtime_root is None:
+                lib_hit = None
+                for root, _, files in os.walk(td_path):
+                    for fn in files:
+                        if fn.startswith("libpiper_phonemize.so"):
+                            lib_hit = Path(root) / fn
+                            break
+                    if lib_hit:
+                        break
+                if lib_hit:
+                    # pick the directory that contains a "lib" folder (common) or the lib's parent
+                    cand = lib_hit.parent.parent if lib_hit.parent.name == "lib" else lib_hit.parent
+                    runtime_root = cand
+
+            # If still unknown, use piper's parent (last resort)
+            if runtime_root is None:
+                runtime_root = piper_found.parent
+
+            # Compute installed piper path relative to runtime root
             try:
-                if piper_dest.exists():
-                    piper_dest.unlink()
+                rel_piper = piper_found.relative_to(runtime_root)
+            except Exception:
+                rel_piper = Path("piper")
+
+            # Install full runtime root to destination (replace existing)
+            self.progress.emit(f"Installing Piper runtime to: {runtime_dir}")
+            try:
+                if runtime_dir.exists():
+                    shutil.rmtree(runtime_dir)
             except Exception:
                 pass
 
             try:
-                piper_dest.write_bytes(piper_found.read_bytes())
-                os.chmod(piper_dest, 0o755)
+                shutil.copytree(runtime_root, runtime_dir, dirs_exist_ok=True)
             except Exception as e:
-                self.finished.emit(False, f"Failed to install Piper to {piper_dest}: {e}")
+                self.finished.emit(False, f"Failed to install Piper runtime to {runtime_dir}: {e}")
                 return
+
+            # Ensure piper executable bit
+            installed_piper = runtime_dir / rel_piper
+            if not installed_piper.exists():
+                # fallback to our expected bin location
+                installed_piper = piper_dest
+            try:
+                os.chmod(installed_piper, 0o755)
+            except Exception:
+                pass
+
+            # Set piper_dest to actual installed path for settings
+            piper_dest = installed_piper
 
         # Save setting so desktop shortcut launches work without PATH
         try:

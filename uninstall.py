@@ -76,10 +76,10 @@ class UninstallThread(QThread):
 
                 # Remove bundled Piper binary if installed
                 self.progress.emit("Removing bundled Piper (if installed)...")
-                piper_path = self._xdg_data_home() / "readanything" / "bin" / "piper"
-                if piper_path.exists():
+                piper_runtime_dir = self._xdg_data_home() / "readanything" / "piper"
+                if piper_runtime_dir.exists():
                     try:
-                        piper_path.unlink()
+                        shutil.rmtree(piper_runtime_dir)
                         removed_items.append("✓ Bundled Piper removed")
                     except Exception as e:
                         errors.append(f"✗ Failed to remove bundled Piper: {e}")
