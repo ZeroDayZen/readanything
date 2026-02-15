@@ -906,13 +906,22 @@ class ReadAnythingApp(QMainWindow):
         msg.setWindowTitle("About ReadAnything")
         msg.setTextFormat(Qt.TextFormat.RichText)
         msg.setText(about_text)
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        ok_btn = msg.addButton(QMessageBox.StandardButton.Ok)
+        check_updates_btn = msg.addButton("Check for Updates", QMessageBox.ButtonRole.ActionRole)
+        msg.setDefaultButton(ok_btn)
         msg.exec()
+
+        if msg.clickedButton() == check_updates_btn:
+            self.show_check_for_updates(auto_check=True)
     
-    def show_check_for_updates(self):
+    def show_check_for_updates(self, auto_check: bool = False):
         """Show the Check for Updates dialog"""
         if UPDATER_AVAILABLE:
-            self.updater_window = UpdaterWindow()
+            try:
+                self.updater_window = UpdaterWindow(auto_check=auto_check)
+            except TypeError:
+                # Backwards compatibility if updater doesn't accept auto_check
+                self.updater_window = UpdaterWindow()
             self.updater_window.show()
         else:
             QMessageBox.information(
