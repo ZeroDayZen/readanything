@@ -52,6 +52,13 @@ except ImportError:
     except ImportError:
         UPDATER_AVAILABLE = False
 
+# Piper voice manager (optional)
+try:
+    from piper_voice_manager import PiperVoiceManagerDialog
+    PIPER_VOICE_MANAGER_AVAILABLE = True
+except Exception:
+    PIPER_VOICE_MANAGER_AVAILABLE = False
+
 
 class GlobalHotkeyThread(QThread):
     """Thread for listening to global hotkeys"""
@@ -733,6 +740,12 @@ class ReadAnythingApp(QMainWindow):
         self.voice_combo = QComboBox()
         self.populate_voices()
         voice_layout.addWidget(self.voice_combo)
+
+        # Piper voices manager (download/install models)
+        self.piper_voices_btn = QPushButton("Piper Voices…")
+        self.piper_voices_btn.setToolTip("Download and manage offline neural Piper voices")
+        self.piper_voices_btn.clicked.connect(self.open_piper_voice_manager)
+        voice_layout.addWidget(self.piper_voices_btn)
         controls_layout.addLayout(voice_layout)
         
         # Speed control
@@ -827,6 +840,10 @@ class ReadAnythingApp(QMainWindow):
         # Check for Updates action
         check_updates_action = help_menu.addAction("Check for Updates")
         check_updates_action.triggered.connect(self.show_check_for_updates)
+
+        # Piper voices manager
+        piper_voices_action = help_menu.addAction("Piper Voices…")
+        piper_voices_action.triggered.connect(self.open_piper_voice_manager)
         
         # About action
         about_action = help_menu.addAction("About ReadAnything")
@@ -933,6 +950,27 @@ class ReadAnythingApp(QMainWindow):
                 "Or use git:\n"
                 "  git pull origin main"
             )
+
+    def open_piper_voice_manager(self):
+        """Open the Piper voice download/manager dialog."""
+        if not PIPER_VOICE_MANAGER_AVAILABLE:
+            QMessageBox.information(
+                self,
+                "Piper Voices",
+                "Piper voice manager is not available.\n\n"
+                "Make sure `piper_voice_manager.py` is present and PyQt6 is installed.\n\n"
+                "You can still install voices manually by downloading a Piper voice model (.onnx) and config (.onnx.json)\n"
+                "into: ~/.local/share/piper/voices"
+            )
+            return
+
+        dlg = PiperVoiceManagerDialog(self)
+        dlg.exec()
+        # Refresh list in case the user installed new voices
+        try:
+            self.populate_voices()
+        except Exception:
+            pass
     
     def get_default_system_voice(self):
         """Get the default system voice name"""
@@ -996,13 +1034,22 @@ class ReadAnythingApp(QMainWindow):
                 # Get voice name from directory structure or filename
                 # Piper models are often in: language/voice/voice.onnx
                 parts = model_file.parts
-                if len(parts) >= 2:
-                    # Use parent directory name as voice identifier
-                    voice_name = parts[-2] if len(parts) > 1 else model_file.stem
-                    # Create display name
-                    display_name = f"Piper: {voice_name}"
-                    # Store full path as voice_id
-                    piper_voices.append((display_name, str(model_file)))
+                # Common structure is: <family>/<locale>/<voice>/<quality>/<file>.onnx
+                # Example: en/en_US/amy/medium/en_US-amy-medium.onnx
+                voice_name = model_file.stem
+                quality = ""
+                try:
+                    if len(parts) >= 4:
+                        quality = parts[-2]
+                        voice_dir = parts[-3]
+                        # Prefer directory names over stem
+                        if voice_dir and quality:
+                            voice_name = voice_dir
+                except Exception:
+                    pass
+
+                display_name = f"Piper: {voice_name}" + (f" ({quality})" if quality else "")
+                piper_voices.append((display_name, str(model_file)))
         
         return piper_voices
     
