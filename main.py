@@ -808,6 +808,90 @@ class TextToSpeechThread(QThread):
                     pass
 
 
+def _playback_speed_from_rate(rate: int) -> float:
+    """Convert WPM rate to playback speed multiplier (0.3–2.5)."""
+    rate = max(50, min(300, rate))
+    return max(0.3, min(2.5, rate / 150.0))
+
+
+class PlayWavThread(QThread):
+    """Play a pre-rendered WAV file (no TTS). Used when we have pre-rendered audio."""
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, wav_path: str, rate: int):
+        super().__init__()
+        self.wav_path = wav_path
+        self.rate = rate
+        self._process = None
+        self._is_running = True
+        self.setTerminationEnabled(False)
+
+    def run(self):
+        try:
+            if not os.path.exists(self.wav_path):
+                self.error.emit("Pre-rendered audio file not found.")
+                return
+            speed = _playback_speed_from_rate(self.rate)
+            if platform.system() == "Darwin":
+                self._process = subprocess.Popen(
+                    ["afplay", self.wav_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            elif platform.system() == "Linux":
+                players = [
+                    ("mpv", ["--no-video", "--no-terminal", "--audio-buffer=0.1", f"--speed={speed:.2f}", self.wav_path]),
+                    ("ffplay", ["-autoexit", "-nodisp", "-i", self.wav_path, "-af", f"atempo={speed:.2f}"]),
+                    ("paplay", [self.wav_path]),
+                ]
+                for name, args in players:
+                    try:
+                        self._process = subprocess.Popen(
+                            [name] + args,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        if self._process and self._process.poll() is None:
+                            break
+                        if self._process:
+                            self._process.terminate()
+                        self._process = None
+                    except FileNotFoundError:
+                        continue
+                if not self._process:
+                    self.error.emit("No audio player found. Install: mpv, ffplay, or paplay")
+                    return
+            else:
+                os.startfile(self.wav_path)
+                self._process = type("_Dummy", (), {"poll": lambda: None, "terminate": lambda: None, "wait": lambda t=None: None})()
+
+            while self._process and self._process.poll() is None and self._is_running:
+                self.msleep(100)
+            if self._process and self._process.poll() is None:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=0.5)
+                except Exception:
+                    pass
+            if self._is_running:
+                self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def stop(self):
+        self._is_running = False
+        if self._process and self._process.poll() is None:
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=0.1)
+            except Exception:
+                try:
+                    self._process.kill()
+                except Exception:
+                    pass
+
+
 class ReadAnythingApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -820,6 +904,14 @@ class ReadAnythingApp(QMainWindow):
         # Piper warm-up: track which models we've preloaded so Play starts faster
         self._piper_preloaded = set()
         self._piper_preload_lock = threading.Lock()
+        # Pre-render: generate Piper audio in background so Play starts without stutter
+        self._pre_render_text = None
+        self._pre_render_voice_id = None
+        self._pre_render_audio_path = None
+        self._pre_render_lock = threading.Lock()
+        self._pre_render_debounce_timer = QTimer(self)
+        self._pre_render_debounce_timer.setSingleShot(True)
+        self._pre_render_debounce_timer.timeout.connect(self._do_pre_render)
         # Fully offline: use system TTS only (no network calls)
         # Word highlighting
         self.highlight_timer = QTimer()
@@ -928,6 +1020,7 @@ class ReadAnythingApp(QMainWindow):
         self.text_area.setPlaceholderText("Type or paste your text here...")
         self.text_area.setFont(QFont("Arial", 12))
         self.text_area.setStyleSheet("background-color: white; color: black;")
+        self.text_area.textChanged.connect(self._on_text_or_voice_changed)
         layout.addWidget(self.text_area)
         
         # Controls section
@@ -943,6 +1036,7 @@ class ReadAnythingApp(QMainWindow):
         self.voice_combo = QComboBox()
         self.populate_voices()
         self.voice_combo.currentIndexChanged.connect(self._on_voice_selection_changed)
+        self.voice_combo.currentIndexChanged.connect(self._on_text_or_voice_changed)
         voice_layout.addWidget(self.voice_combo)
 
         # Piper voices manager (download/install models)
@@ -1289,6 +1383,94 @@ class ReadAnythingApp(QMainWindow):
 
         t = threading.Thread(target=run, daemon=True)
         t.start()
+
+    PRE_RENDER_DEBOUNCE_MS = 700
+    PRE_RENDER_MAX_CHARS = 30_000
+
+    def _on_text_or_voice_changed(self):
+        """Invalidate pre-render and restart debounce so we pre-render after user stops typing."""
+        with self._pre_render_lock:
+            old_path = self._pre_render_audio_path
+            self._pre_render_text = None
+            self._pre_render_voice_id = None
+            self._pre_render_audio_path = None
+        if old_path and os.path.exists(old_path):
+            try:
+                os.unlink(old_path)
+            except Exception:
+                pass
+        self._pre_render_debounce_timer.stop()
+        self._pre_render_debounce_timer.start(self.PRE_RENDER_DEBOUNCE_MS)
+
+    def _do_pre_render(self):
+        """Start background pre-render of current text with current Piper voice (if any)."""
+        text = self.text_area.toPlainText().strip()
+        voice_id = self.voice_combo.currentData()
+        if not text or len(text) > self.PRE_RENDER_MAX_CHARS or not voice_id or not isinstance(voice_id, str) or not voice_id.endswith(".onnx") or not os.path.exists(voice_id):
+            return
+        if not self.piper_available or not self.piper_binary:
+            return
+        # Run Piper in a background thread and set result on main thread when done
+        piper_binary = str(self.piper_binary)
+        model_path = voice_id
+
+        def worker():
+            import tempfile
+            tmp = None
+            try:
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                temp_path = tmp.name
+                tmp.close()
+                proc = subprocess.run(
+                    [piper_binary, "--model", model_path, "--output_file", temp_path],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=120,
+                    input=text.encode("utf-8"),
+                )
+                if proc.returncode == 0 and os.path.exists(temp_path):
+                    QTimer.singleShot(0, lambda: self._on_pre_render_done(True, temp_path, text, voice_id))
+                else:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.unlink(temp_path)
+                        except Exception:
+                            pass
+                    QTimer.singleShot(0, lambda: self._on_pre_render_done(False, None, text, voice_id))
+            except Exception:
+                if tmp and os.path.exists(tmp.name):
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+                QTimer.singleShot(0, lambda: self._on_pre_render_done(False, None, text, voice_id))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_pre_render_done(self, success: bool, path: str | None, text: str, voice_id):
+        """Called on main thread when pre-render worker finishes."""
+        # Only apply if text/voice haven't changed since we started (avoid stale pre-render)
+        current_text = self.text_area.toPlainText().strip()
+        current_voice = self.voice_combo.currentData()
+        if success and path and current_text == text and current_voice == voice_id:
+            with self._pre_render_lock:
+                old_path = self._pre_render_audio_path
+                self._pre_render_text = text
+                self._pre_render_voice_id = voice_id
+                self._pre_render_audio_path = path
+            if old_path and old_path != path and os.path.exists(old_path):
+                try:
+                    os.unlink(old_path)
+                except Exception:
+                    pass
+            self.statusBar().showMessage("Ready to play", 2000)
+        else:
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
 
     def get_default_system_voice(self):
         """Get the default system voice name"""
@@ -1715,6 +1897,21 @@ class ReadAnythingApp(QMainWindow):
             
             # Detect if Piper voice is selected (voice_id is a path to .onnx file)
             is_piper_voice = voice_id and isinstance(voice_id, str) and voice_id.endswith('.onnx') and os.path.exists(voice_id)
+
+            # Use pre-rendered audio if we have a match (no stutter on start)
+            with self._pre_render_lock:
+                path = self._pre_render_audio_path
+                pr_text = self._pre_render_text
+                pr_voice = self._pre_render_voice_id
+            if is_piper_voice and path and os.path.exists(path) and pr_text == text and pr_voice == voice_id:
+                self.tts_thread = PlayWavThread(path, speed)
+                self.tts_thread.finished.connect(self.on_speech_finished)
+                self.tts_thread.error.connect(self.on_speech_error)
+                self.tts_thread.start()
+                self.start_highlighting(text, speed)
+                self.play_btn.setEnabled(False)
+                self.statusBar().showMessage("Playing...")
+                return
             
             if is_piper_voice:
                 # Use Piper TTS (fully offline neural TTS)
