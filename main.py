@@ -13,6 +13,7 @@ import os
 import platform
 import subprocess
 import shutil
+import threading
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -214,6 +215,7 @@ class TextToSpeechThread(QThread):
         self.piper_binary = piper_binary
         self._is_running = True
         self._process = None
+        self._piper_process = None
         # Prevent thread from causing app to exit
         self.setTerminationEnabled(False)
     
@@ -519,6 +521,19 @@ class TextToSpeechThread(QThread):
     
     def stop(self):
         self._is_running = False
+        # Stop piper process if running (when using raw streaming)
+        if self._piper_process and self._piper_process.poll() is None:
+            try:
+                self._piper_process.terminate()
+                try:
+                    self._piper_process.wait(timeout=0.05)
+                except Exception:
+                    try:
+                        self._piper_process.kill()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         # Stop subprocess if running (immediate termination)
         if self._process and self._process.poll() is None:
             try:
@@ -555,6 +570,85 @@ class TextToSpeechThread(QThread):
         # Don't call _cleanup_engine here - it will be called in finally block
         # This allows the thread to exit quickly
     
+    def _read_piper_sample_rate(self, model_path: str) -> int:
+        """
+        Piper voice configs are commonly stored as `<model>.onnx.json`.
+        Default to 22050 Hz if config is missing/unparseable.
+        """
+        try:
+            config_path = model_path + ".json"  # model.onnx.json
+            if os.path.exists(config_path):
+                import json as _json
+                cfg = _json.loads(Path(config_path).read_text(encoding="utf-8"))
+                # common shape: {"audio":{"sample_rate":22050}}
+                sr = ((cfg or {}).get("audio") or {}).get("sample_rate")
+                sr = int(sr) if sr else 22050
+                return max(8000, min(96000, sr))
+        except Exception:
+            pass
+        return 22050
+
+    def _run_piper_tts_stream_raw_linux(self, model_path: str):
+        """
+        Lower-latency Piper path: stream raw PCM to aplay via stdout.
+        Falls back to WAV generation if unavailable.
+        """
+        sample_rate = self._read_piper_sample_rate(model_path)
+
+        # Piper raw output is typically 16-bit little-endian mono PCM.
+        piper_cmd = [str(self.piper_binary), "--model", model_path, "--output-raw"]
+        # Use aplay (alsa-utils) which is commonly installed on Linux.
+        player_cmd = ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-c", "1", "-r", str(sample_rate), "-"]
+
+        # Start Piper and pipe into player.
+        # Use binary mode because stdout is raw PCM.
+        self._piper_process = subprocess.Popen(
+            piper_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if not self._piper_process.stdout:
+            raise Exception("Failed to start Piper (no stdout).")
+
+        self._process = subprocess.Popen(
+            player_cmd,
+            stdin=self._piper_process.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        # Send text to Piper
+        try:
+            if self._piper_process.stdin:
+                self._piper_process.stdin.write(self.text.encode("utf-8"))
+                self._piper_process.stdin.close()
+        except Exception:
+            pass
+
+        # Wait for Piper to finish (player will drain)
+        while self._piper_process.poll() is None:
+            if not self._is_running:
+                break
+            self.msleep(50)
+
+        # Collect Piper errors if any
+        piper_rc = self._piper_process.poll()
+        if piper_rc not in (0, None):
+            try:
+                stderr = self._piper_process.stderr.read().decode("utf-8", errors="ignore") if self._piper_process.stderr else ""
+            except Exception:
+                stderr = ""
+            # If --output-raw isn't supported or aplay missing, surface a clear error for fallback.
+            raise Exception(f"piper command failed: {stderr}".strip())
+
+        # Wait for playback to finish
+        if self._process:
+            while self._process.poll() is None:
+                if not self._is_running:
+                    break
+                self.msleep(50)
+
     def _run_piper_tts(self):
         """Run TTS using Piper TTS (fully offline neural TTS)"""
         if not self.piper_binary:
@@ -573,6 +667,15 @@ class TextToSpeechThread(QThread):
             raise Exception(f"Piper voice model not found: {model_path}")
         
         try:
+            # Linux: prefer lower-latency raw streaming when possible
+            if platform.system() == "Linux":
+                try:
+                    self._run_piper_tts_stream_raw_linux(model_path)
+                    return
+                except Exception as stream_err:
+                    # Fallback to WAV generation if raw streaming fails for any reason
+                    print(f"Piper raw streaming unavailable, falling back to WAV: {stream_err}", file=sys.stderr)
+
             # Create temp file for audio output
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             temp_path = temp_file.name
@@ -698,6 +801,11 @@ class TextToSpeechThread(QThread):
                         self._process.stdin.close()
                 except:
                     pass
+            if self._piper_process and hasattr(self._piper_process, "stdin") and self._piper_process.stdin:
+                try:
+                    self._piper_process.stdin.close()
+                except Exception:
+                    pass
 
 
 class ReadAnythingApp(QMainWindow):
@@ -709,6 +817,9 @@ class ReadAnythingApp(QMainWindow):
         self.settings = load_settings()
         self.piper_binary = find_piper_binary(self.settings.get("piper_bin_path") or None)
         self.piper_available = bool(self.piper_binary)
+        # Piper warm-up: track which models we've preloaded so Play starts faster
+        self._piper_preloaded = set()
+        self._piper_preload_lock = threading.Lock()
         # Fully offline: use system TTS only (no network calls)
         # Word highlighting
         self.highlight_timer = QTimer()
@@ -831,6 +942,7 @@ class ReadAnythingApp(QMainWindow):
         
         self.voice_combo = QComboBox()
         self.populate_voices()
+        self.voice_combo.currentIndexChanged.connect(self._on_voice_selection_changed)
         voice_layout.addWidget(self.voice_combo)
 
         # Piper voices manager (download/install models)
@@ -1140,6 +1252,44 @@ class ReadAnythingApp(QMainWindow):
 
         dlg.exec()
     
+    def _on_voice_selection_changed(self):
+        """When user selects a voice, warm up Piper if it's a Piper voice."""
+        voice_id = self.voice_combo.currentData()
+        if not voice_id or not isinstance(voice_id, str) or not voice_id.endswith(".onnx"):
+            return
+        if not os.path.exists(voice_id):
+            return
+        self._piper_preload_async(voice_id)
+
+    def _piper_preload_async(self, model_path: str):
+        """
+        Preload a Piper model in the background so the next Play has less delay.
+        Runs piper once with minimal input so the OS caches the model and libs.
+        """
+        if not self.piper_available or not self.piper_binary:
+            return
+        with self._piper_preload_lock:
+            if model_path in self._piper_preloaded:
+                return
+            self._piper_preloaded.add(model_path)
+
+        def run():
+            try:
+                subprocess.run(
+                    [str(self.piper_binary), "--model", model_path, "--output-raw"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    input=b" ",
+                    timeout=45,
+                )
+            except Exception:
+                with self._piper_preload_lock:
+                    self._piper_preloaded.discard(model_path)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
     def get_default_system_voice(self):
         """Get the default system voice name"""
         try:
@@ -1242,6 +1392,8 @@ class ReadAnythingApp(QMainWindow):
                 if not self.piper_available:
                     display_name = f"{display_name} (install piper binary to use)"
                 self.voice_combo.addItem(display_name, model_path)
+        # After list is built, warm up Piper for current selection if it's a Piper voice
+        QTimer.singleShot(0, self._on_voice_selection_changed)
     
     def populate_voices_old(self):
         """Old populate_voices method - kept for reference but not used"""
