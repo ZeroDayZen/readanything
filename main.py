@@ -41,6 +41,17 @@ try:
 except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
     PIPER_TTS_AVAILABLE = False
 
+# Update checker (optional - UpdaterWindow from update.py)
+try:
+    from update import UpdaterWindow
+    UPDATER_AVAILABLE = True
+except ImportError:
+    try:
+        from readanything.update import UpdaterWindow
+        UPDATER_AVAILABLE = True
+    except ImportError:
+        UPDATER_AVAILABLE = False
+
 
 class GlobalHotkeyThread(QThread):
     """Thread for listening to global hotkeys"""
@@ -813,6 +824,10 @@ class ReadAnythingApp(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("Help")
         
+        # Check for Updates action
+        check_updates_action = help_menu.addAction("Check for Updates")
+        check_updates_action.triggered.connect(self.show_check_for_updates)
+        
         # About action
         about_action = help_menu.addAction("About ReadAnything")
         about_action.triggered.connect(self.show_about)
@@ -893,6 +908,22 @@ class ReadAnythingApp(QMainWindow):
         msg.setText(about_text)
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg.exec()
+    
+    def show_check_for_updates(self):
+        """Show the Check for Updates dialog"""
+        if UPDATER_AVAILABLE:
+            self.updater_window = UpdaterWindow()
+            self.updater_window.show()
+        else:
+            QMessageBox.information(
+                self,
+                "Check for Updates",
+                "The updater is not available.\n\n"
+                "To update manually, run from the project directory:\n"
+                "  python update.py\n\n"
+                "Or use git:\n"
+                "  git pull origin main"
+            )
     
     def get_default_system_voice(self):
         """Get the default system voice name"""
