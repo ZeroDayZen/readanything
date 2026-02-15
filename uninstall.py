@@ -9,6 +9,7 @@ import os
 import platform
 import subprocess
 import shutil
+import json
 from pathlib import Path
 
 try:
@@ -34,6 +35,18 @@ class UninstallThread(QThread):
         self.remove_project_dir = remove_project_dir
         self.project_dir = Path(__file__).parent.absolute()
         self.home_dir = Path.home()
+
+    def _xdg_data_home(self) -> Path:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            return Path(xdg).expanduser()
+        return self.home_dir / ".local" / "share"
+
+    def _xdg_config_home(self) -> Path:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        if xdg:
+            return Path(xdg).expanduser()
+        return self.home_dir / ".config"
         
     def run(self):
         try:
@@ -60,6 +73,25 @@ class UninstallThread(QThread):
                         removed_items.append("✓ Desktop shortcut removed")
                     except Exception as e:
                         errors.append(f"✗ Failed to remove desktop shortcut: {e}")
+
+                # Remove bundled Piper binary if installed
+                self.progress.emit("Removing bundled Piper (if installed)...")
+                piper_path = self._xdg_data_home() / "readanything" / "bin" / "piper"
+                if piper_path.exists():
+                    try:
+                        piper_path.unlink()
+                        removed_items.append("✓ Bundled Piper removed")
+                    except Exception as e:
+                        errors.append(f"✗ Failed to remove bundled Piper: {e}")
+
+                # Remove settings file (contains piper path)
+                settings_path = self._xdg_config_home() / "readanything" / "settings.json"
+                if settings_path.exists():
+                    try:
+                        settings_path.unlink()
+                        removed_items.append("✓ Settings removed")
+                    except Exception as e:
+                        errors.append(f"✗ Failed to remove settings: {e}")
             else:
                 # macOS: Remove .app bundle
                 self.progress.emit("Removing application bundle...")

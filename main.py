@@ -12,11 +12,12 @@ import sys
 import os
 import platform
 import subprocess
+import shutil
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QSlider, QComboBox,
-    QMessageBox, QMenuBar, QMenu
+    QMessageBox, QMenuBar, QMenu, QDialog, QFileDialog, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon, QTextCharFormat, QTextCursor, QColor, QShortcut, QKeySequence
@@ -27,19 +28,68 @@ try:
 except ImportError:
     PYNPUT_AVAILABLE = False
 
-# Piper TTS (fully offline neural TTS)
-PIPER_TTS_AVAILABLE = False
 try:
-    # Check if piper binary is available
-    if platform.system() == 'Windows':
-        # Windows: use 'where' command
-        result = subprocess.run(['where', 'piper'], capture_output=True, text=True, timeout=2)
-    else:
-        # Unix/Linux/macOS: use 'which' command
-        result = subprocess.run(['which', 'piper'], capture_output=True, text=True, timeout=2)
-    PIPER_TTS_AVAILABLE = (result.returncode == 0)
-except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-    PIPER_TTS_AVAILABLE = False
+    from readanything_settings import load_settings, save_settings
+except Exception:
+    load_settings = lambda: {"piper_bin_path": ""}  # type: ignore
+    save_settings = lambda settings: None  # type: ignore
+
+def find_piper_binary(configured_path: str | None = None) -> str | None:
+    """
+    Locate the Piper TTS executable.
+
+    Supports:
+    - `PIPER_BIN_PATH` env var override
+    - common user-local paths
+    - PATH lookup
+    """
+    # 0) Saved configuration
+    if configured_path:
+        try:
+            p = Path(configured_path).expanduser()
+            if p.exists() and os.access(str(p), os.X_OK):
+                return str(p)
+        except Exception:
+            pass
+
+    # 1) Explicit override
+    env_path = os.environ.get("PIPER_BIN_PATH")
+    if env_path:
+        p = Path(env_path).expanduser()
+        if p.exists() and os.access(str(p), os.X_OK):
+            return str(p)
+
+    # 2) Common locations
+    candidates = [
+        Path.home() / ".local" / "bin" / "piper",
+        Path.home() / "bin" / "piper",
+        Path.home() / ".local" / "share" / "piper" / "piper",
+        Path("/usr/local/bin/piper"),
+        Path("/opt/homebrew/bin/piper"),  # Homebrew Apple Silicon default
+        Path("/usr/bin/piper"),
+    ]
+    for c in candidates:
+        try:
+            if c.exists() and os.access(str(c), os.X_OK):
+                return str(c)
+        except Exception:
+            continue
+
+    # 3) PATH
+    try:
+        which = shutil.which("piper")
+        if which:
+            return which
+    except Exception:
+        pass
+
+    return None
+
+
+# Piper TTS (fully offline neural TTS)
+# Note: app instances may override this using saved settings.
+PIPER_BINARY = find_piper_binary()
+PIPER_TTS_AVAILABLE = bool(PIPER_BINARY)
 
 # Update checker (optional - UpdaterWindow from update.py)
 try:
@@ -69,8 +119,11 @@ def get_version_display() -> str:
         )
         git_desc = result.stdout.strip() if result.returncode == 0 else ""
         if git_desc:
-            # Keep the human version but add build id
-            return f"{VERSION_NAME} ({git_desc})"
+            # If repo has no tags, git_desc is just a hash; don't pretend it's VERSION_NAME.
+            import re
+            if re.fullmatch(r"[0-9a-f]{7,}(-dirty)?", git_desc):
+                return f"dev-{git_desc}"
+            return git_desc
     except Exception:
         pass
     return VERSION_NAME
@@ -151,13 +204,14 @@ class TextToSpeechThread(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
     
-    def __init__(self, text, engine, rate, voice_id, tts_engine_type='default'):
+    def __init__(self, text, engine, rate, voice_id, tts_engine_type='default', piper_binary: str | None = None):
         super().__init__()
         self.text = text
         self.engine = engine
         self.rate = rate
         self.voice_id = voice_id
         self.tts_engine_type = tts_engine_type  # 'default' or 'piper'
+        self.piper_binary = piper_binary
         self._is_running = True
         self._process = None
         # Prevent thread from causing app to exit
@@ -267,7 +321,7 @@ class TextToSpeechThread(QThread):
             # Fully offline TTS: system or Piper TTS
             
             # Use Piper TTS if specified (fully offline neural TTS)
-            if self.tts_engine_type == 'piper' and PIPER_TTS_AVAILABLE:
+            if self.tts_engine_type == 'piper' and self.piper_binary:
                 self._run_piper_tts()
                 return
             
@@ -503,8 +557,13 @@ class TextToSpeechThread(QThread):
     
     def _run_piper_tts(self):
         """Run TTS using Piper TTS (fully offline neural TTS)"""
-        if not PIPER_TTS_AVAILABLE:
-            raise Exception("Piper TTS not available. Install piper binary: https://github.com/rhasspy/piper")
+        if not self.piper_binary:
+            raise Exception(
+                "Piper TTS not available.\n\n"
+                "Install the `piper` executable and ensure it's in your PATH, or set:\n"
+                "  PIPER_BIN_PATH=/full/path/to/piper\n\n"
+                "Install instructions: https://github.com/rhasspy/piper"
+            )
         
         import tempfile
         
@@ -520,8 +579,8 @@ class TextToSpeechThread(QThread):
             temp_file.close()
             
             # Build piper command
-            # piper --model <model_path> --output_file <output> --text "<text>"
-            cmd = ['piper', '--model', model_path, '--output_file', temp_path]
+            # piper --model <model_path> --output_file <output>
+            cmd = [str(self.piper_binary), '--model', model_path, '--output_file', temp_path]
             
             # Add text via stdin
             self._process = subprocess.Popen(
@@ -647,6 +706,9 @@ class ReadAnythingApp(QMainWindow):
         self.tts_thread = None
         self.engine = None
         self.voices = []  # Initialize to empty list to prevent AttributeError
+        self.settings = load_settings()
+        self.piper_binary = find_piper_binary(self.settings.get("piper_bin_path") or None)
+        self.piper_available = bool(self.piper_binary)
         # Fully offline: use system TTS only (no network calls)
         # Word highlighting
         self.highlight_timer = QTimer()
@@ -658,6 +720,12 @@ class ReadAnythingApp(QMainWindow):
         self.hotkey_thread = None
         self.init_ui()
         self.setup_global_hotkey()
+
+    def refresh_piper_state(self):
+        """Reload Piper binary path and availability (after settings change)."""
+        self.settings = load_settings()
+        self.piper_binary = find_piper_binary(self.settings.get("piper_bin_path") or None)
+        self.piper_available = bool(self.piper_binary)
         
     def init_engine(self):
         """Initialize text-to-speech engine"""
@@ -868,6 +936,10 @@ class ReadAnythingApp(QMainWindow):
         # Piper voices manager
         piper_voices_action = help_menu.addAction("Piper Voices…")
         piper_voices_action.triggered.connect(self.open_piper_voice_manager)
+
+        # Piper setup (binary path)
+        piper_setup_action = help_menu.addAction("Piper Setup…")
+        piper_setup_action.triggered.connect(self.open_piper_setup)
         
         # About action
         about_action = help_menu.addAction("About ReadAnything")
@@ -995,6 +1067,78 @@ class ReadAnythingApp(QMainWindow):
             self.populate_voices()
         except Exception:
             pass
+
+    def open_piper_setup(self):
+        """Configure Piper binary path for desktop shortcut launches."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Piper Setup")
+        dlg.setMinimumWidth(520)
+
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "ReadAnything needs the `piper` executable to use Piper voices.\n"
+            "Desktop shortcuts often don't inherit your shell PATH, so you can set the full path here."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Piper binary path:"))
+        path_edit = QLineEdit()
+        path_edit.setPlaceholderText("/full/path/to/piper")
+        path_edit.setText(self.settings.get("piper_bin_path") or "")
+        row.addWidget(path_edit, 1)
+
+        browse_btn = QPushButton("Browse…")
+        row.addWidget(browse_btn)
+        layout.addLayout(row)
+
+        status = QLabel("")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+
+        def update_status():
+            candidate = path_edit.text().strip()
+            found = find_piper_binary(candidate or None)
+            if found:
+                status.setText(f"Detected: {found}")
+            else:
+                status.setText("Not found. Install Piper or choose the correct executable.")
+
+        def browse():
+            fname, _ = QFileDialog.getOpenFileName(dlg, "Select Piper executable")
+            if fname:
+                path_edit.setText(fname)
+                update_status()
+
+        browse_btn.clicked.connect(browse)
+        path_edit.textChanged.connect(lambda _: update_status())
+        update_status()
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        btns.addWidget(save_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+        def on_save():
+            self.settings["piper_bin_path"] = path_edit.text().strip()
+            save_settings(self.settings)
+            self.refresh_piper_state()
+            try:
+                self.populate_voices()
+            except Exception:
+                pass
+            dlg.accept()
+
+        save_btn.clicked.connect(on_save)
+        cancel_btn.clicked.connect(dlg.reject)
+
+        dlg.exec()
     
     def get_default_system_voice(self):
         """Get the default system voice name"""
@@ -1095,7 +1239,7 @@ class ReadAnythingApp(QMainWindow):
                 pass
             for display_name, model_path in piper_voices:
                 # If piper binary is missing, still list voices, but make it obvious
-                if not PIPER_TTS_AVAILABLE:
+                if not self.piper_available:
                     display_name = f"{display_name} (install piper binary to use)"
                 self.voice_combo.addItem(display_name, model_path)
     
@@ -1422,11 +1566,20 @@ class ReadAnythingApp(QMainWindow):
             
             if is_piper_voice:
                 # Use Piper TTS (fully offline neural TTS)
-                if not PIPER_TTS_AVAILABLE:
-                    QMessageBox.warning(self, "Piper TTS Not Available", 
-                                      "Piper TTS binary is not installed.\n\n"
-                                      "Install piper: https://github.com/rhasspy/piper\n\n"
-                                      "Or select a system voice instead.")
+                if not self.piper_available:
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Icon.Warning)
+                    msg.setWindowTitle("Piper TTS Not Available")
+                    msg.setText("Piper voices are installed, but the `piper` executable was not found.")
+                    msg.setInformativeText(
+                        "Click “Piper Setup…” to select the Piper binary path.\n\n"
+                        "Alternatively, install Piper and ensure `piper` is on your PATH."
+                    )
+                    setup_btn = msg.addButton("Piper Setup…", QMessageBox.ButtonRole.ActionRole)
+                    msg.addButton(QMessageBox.StandardButton.Ok)
+                    msg.exec()
+                    if msg.clickedButton() == setup_btn:
+                        self.open_piper_setup()
                     return
                 tts_engine_type = 'piper'
                 engine = None  # Not used for Piper TTS
@@ -1442,7 +1595,10 @@ class ReadAnythingApp(QMainWindow):
             
             # Create and start thread
             try:
-                self.tts_thread = TextToSpeechThread(text, engine, speed, voice_id, tts_engine_type)
+                self.tts_thread = TextToSpeechThread(
+                    text, engine, speed, voice_id, tts_engine_type,
+                    piper_binary=self.piper_binary
+                )
                 
                 # Connect signals BEFORE starting thread
                 self.tts_thread.finished.connect(self.on_speech_finished)

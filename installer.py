@@ -7,6 +7,10 @@ import sys
 import os
 import subprocess
 import platform
+import json
+import tarfile
+import tempfile
+import urllib.request
 from pathlib import Path
 
 try:
@@ -40,6 +44,8 @@ class InstallThread(QThread):
                 self.install_system_dependencies()
             elif self.install_type == 'python':
                 self.install_python_dependencies()
+            elif self.install_type == 'piper':
+                self.install_piper()
             elif self.install_type == 'verify':
                 self.verify_installation()
             elif self.install_type == 'run':
@@ -48,6 +54,203 @@ class InstallThread(QThread):
                 self.finished.emit(False, "Unknown installation type")
         except Exception as e:
             self.finished.emit(False, str(e))
+
+    def _xdg_data_home(self) -> Path:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            return Path(xdg).expanduser()
+        return Path.home() / ".local" / "share"
+
+    def _xdg_config_home(self) -> Path:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        if xdg:
+            return Path(xdg).expanduser()
+        return Path.home() / ".config"
+
+    def _readanything_config_path(self) -> Path:
+        return self._xdg_config_home() / "readanything" / "settings.json"
+
+    def _save_piper_path_setting(self, piper_path: Path) -> None:
+        cfg_path = self._readanything_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        try:
+            if cfg_path.exists():
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+        except Exception:
+            data = {}
+        data["piper_bin_path"] = str(piper_path)
+        cfg_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _machine_arch(self) -> str:
+        # Normalize common arch names for release assets
+        m = (platform.machine() or "").lower()
+        if m in ("x86_64", "amd64"):
+            return "x86_64"
+        if m in ("aarch64", "arm64"):
+            return "aarch64"
+        if m.startswith("armv7"):
+            return "armv7"
+        return m or "x86_64"
+
+    def _github_latest_release_asset(self, owner: str, repo: str, name_contains: list[str]) -> tuple[str, str]:
+        """
+        Returns (asset_name, browser_download_url).
+        """
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                "User-Agent": "ReadAnythingInstaller/1.0",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        assets = data.get("assets") or []
+        for a in assets:
+            aname = a.get("name") or ""
+            url = a.get("browser_download_url") or ""
+            if not aname or not url:
+                continue
+            hay = aname.lower()
+            if all(s.lower() in hay for s in name_contains):
+                return aname, url
+        raise RuntimeError(f"Could not find a matching release asset in {owner}/{repo}.")
+
+    def _download_file(self, url: str, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "ReadAnythingInstaller/1.0", "Accept": "*/*"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
+            total = int(resp.headers.get("Content-Length", "0") or "0")
+            downloaded = 0
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    pct = int((downloaded / total) * 100)
+                    self.progress.emit(f"Downloading Piper… {pct}%")
+
+    def install_piper(self):
+        """Download and install Piper binary to a known location (Linux)."""
+        if platform.system() != "Linux":
+            self.finished.emit(False, "Piper install step is currently supported on Linux only.")
+            return
+
+        arch = self._machine_arch()
+        self.progress.emit(f"Detecting system architecture… ({arch})")
+
+        # Install location (known, user-writable)
+        bin_dir = self._xdg_data_home() / "readanything" / "bin"
+        piper_dest = bin_dir / "piper"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find an appropriate release asset
+        # Primary: rhasspy/piper (archived but still hosts releases)
+        # Fallback: OHF-Voice/piper1-gpl (community continuation)
+        asset_url = None
+        asset_name = None
+        errors = []
+
+        # Common asset naming: piper_linux_<arch>.tar.gz
+        name_contains = ["piper", "linux", arch, ".tar.gz"]
+        for owner, repo in [("rhasspy", "piper"), ("OHF-Voice", "piper1-gpl")]:
+            try:
+                self.progress.emit(f"Looking up latest Piper release… ({owner}/{repo})")
+                asset_name, asset_url = self._github_latest_release_asset(owner, repo, name_contains=name_contains)
+                break
+            except Exception as e:
+                errors.append(f"{owner}/{repo}: {e}")
+
+        # If arch-specific asset wasn't found, try x86_64 as a last resort (common on Kali)
+        if not asset_url and arch != "x86_64":
+            for owner, repo in [("rhasspy", "piper"), ("OHF-Voice", "piper1-gpl")]:
+                try:
+                    self.progress.emit(f"Trying x86_64 Piper asset… ({owner}/{repo})")
+                    asset_name, asset_url = self._github_latest_release_asset(
+                        owner, repo, name_contains=["piper", "linux", "x86_64", ".tar.gz"]
+                    )
+                    break
+                except Exception as e:
+                    errors.append(f"{owner}/{repo} (x86_64 fallback): {e}")
+
+        if not asset_url:
+            self.finished.emit(
+                False,
+                "Could not find a Piper Linux release to download.\n\n"
+                + "\n".join(errors[-6:])
+            )
+            return
+
+        self.progress.emit(f"Downloading Piper release asset: {asset_name}")
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            tar_path = td_path / (asset_name or "piper_linux.tar.gz")
+            self._download_file(asset_url, tar_path)
+
+            self.progress.emit("Extracting Piper…")
+            try:
+                with tarfile.open(tar_path, "r:gz") as tf:
+                    tf.extractall(path=td_path)
+            except Exception as e:
+                self.finished.emit(False, f"Failed to extract Piper archive: {e}")
+                return
+
+            # Find the piper executable within extracted files
+            piper_found = None
+            for root, _, files in os.walk(td_path):
+                if "piper" in files:
+                    candidate = Path(root) / "piper"
+                    if candidate.is_file():
+                        piper_found = candidate
+                        break
+
+            if not piper_found:
+                self.finished.emit(False, "Could not locate `piper` executable inside the downloaded archive.")
+                return
+
+            # Install to destination
+            try:
+                if piper_dest.exists():
+                    piper_dest.unlink()
+            except Exception:
+                pass
+
+            try:
+                piper_dest.write_bytes(piper_found.read_bytes())
+                os.chmod(piper_dest, 0o755)
+            except Exception as e:
+                self.finished.emit(False, f"Failed to install Piper to {piper_dest}: {e}")
+                return
+
+        # Save setting so desktop shortcut launches work without PATH
+        try:
+            self._save_piper_path_setting(piper_dest)
+        except Exception as e:
+            # Piper still installed; just warn about settings
+            self.finished.emit(
+                True,
+                f"✓ Piper installed to: {piper_dest}\n"
+                f"⚠ Could not save settings.json automatically: {e}\n\n"
+                "You can set Piper path in the app via Help → Piper Setup…"
+            )
+            return
+
+        self.finished.emit(
+            True,
+            f"✓ Piper installed successfully!\n\n"
+            f"Installed to: {piper_dest}\n"
+            f"Configured in: {self._readanything_config_path()}\n\n"
+            "Restart ReadAnything, then select a Piper voice and press Play."
+        )
     
     def install_system_dependencies(self):
         """Install system dependencies using apt-get"""
@@ -297,6 +500,12 @@ class InstallerWindow(QMainWindow):
         self.install_python_btn.setMinimumHeight(40)
         self.install_python_btn.clicked.connect(lambda: self.start_installation('python'))
         button_layout.addWidget(self.install_python_btn)
+
+        # Install Piper (optional) button
+        self.install_piper_btn = QPushButton("2.5 Install Piper (Optional Neural Voices)")
+        self.install_piper_btn.setMinimumHeight(40)
+        self.install_piper_btn.clicked.connect(lambda: self.start_installation('piper'))
+        button_layout.addWidget(self.install_piper_btn)
         
         # Verify installation button
         self.verify_btn = QPushButton("3. Verify Installation")
@@ -342,6 +551,7 @@ class InstallerWindow(QMainWindow):
         # Disable buttons during installation
         self.install_system_btn.setEnabled(False)
         self.install_python_btn.setEnabled(False)
+        self.install_piper_btn.setEnabled(False)
         self.verify_btn.setEnabled(False)
         self.run_btn.setEnabled(False)
         
@@ -368,6 +578,7 @@ class InstallerWindow(QMainWindow):
         # Re-enable buttons
         self.install_system_btn.setEnabled(True)
         self.install_python_btn.setEnabled(True)
+        self.install_piper_btn.setEnabled(True)
         self.verify_btn.setEnabled(True)
         self.run_btn.setEnabled(True)
         

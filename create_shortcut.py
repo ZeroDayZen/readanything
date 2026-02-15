@@ -7,6 +7,23 @@ import os
 import sys
 import platform
 from pathlib import Path
+import json
+
+
+def _read_piper_bin_from_settings() -> str:
+    """Best-effort read of configured/bundled Piper path."""
+    try:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        cfg_dir = Path(xdg).expanduser() if xdg else (Path.home() / ".config")
+        settings_path = cfg_dir / "readanything" / "settings.json"
+        if settings_path.exists():
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                p = (data.get("piper_bin_path") or "").strip()
+                return p
+    except Exception:
+        pass
+    return ""
 
 def create_desktop_shortcut():
     """Create a desktop shortcut for ReadAnything"""
@@ -40,12 +57,18 @@ def create_desktop_shortcut():
         return False
     
     # Desktop file content
+    piper_bin = _read_piper_bin_from_settings()
+    exec_prefix = ""
+    if piper_bin:
+        # Ensure shortcut launches with Piper path even if PATH isn't inherited.
+        exec_prefix = f"env PIPER_BIN_PATH={piper_bin} "
+
     desktop_content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
 Name=ReadAnything
 Comment=Text-to-Speech Application
-Exec={venv_python} {main_script}
+Exec={exec_prefix}{venv_python} {main_script}
 Icon={icon_path}
 Terminal=false
 Categories=AudioVideo;Audio;Utility;
