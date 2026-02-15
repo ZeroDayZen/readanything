@@ -27,6 +27,9 @@ PIPER_VOICES_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/mai
 
 def _default_piper_voices_dir() -> Path:
     # Match the first user-writable path from main.py discover_piper_voices()
+    env_path = os.environ.get("PIPER_VOICES_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
     return Path.home() / ".local" / "share" / "piper" / "voices"
 
 
