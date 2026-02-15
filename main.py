@@ -52,6 +52,29 @@ except ImportError:
     except ImportError:
         UPDATER_AVAILABLE = False
 
+
+def get_version_display() -> str:
+    """
+    Return a user-facing version string.
+    Prefer git describe/commit when available so the UI reflects the actual build.
+    """
+    try:
+        project_dir = Path(__file__).parent.absolute()
+        result = subprocess.run(
+            ['git', 'describe', '--tags', '--always', '--dirty'],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        git_desc = result.stdout.strip() if result.returncode == 0 else ""
+        if git_desc:
+            # Keep the human version but add build id
+            return f"{VERSION_NAME} ({git_desc})"
+    except Exception:
+        pass
+    return VERSION_NAME
+
 # Piper voice manager (optional)
 try:
     from piper_voice_manager import PiperVoiceManagerDialog
@@ -681,7 +704,8 @@ class ReadAnythingApp(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle(f"ReadAnything v{VERSION_NAME}")
+        self.version_display = get_version_display()
+        self.setWindowTitle(f"ReadAnything v{self.version_display}")
         self.setGeometry(100, 100, 800, 600)
         
         # Set window icon
@@ -707,7 +731,7 @@ class ReadAnythingApp(QMainWindow):
         layout.addWidget(title)
         
         # Version label
-        version_label = QLabel(f"Version {VERSION_NAME}")
+        version_label = QLabel(f"Version {self.version_display}")
         version_font = QFont()
         version_font.setPointSize(10)
         version_font.setItalic(True)
@@ -822,7 +846,7 @@ class ReadAnythingApp(QMainWindow):
         layout.addLayout(button_layout)
         
         # Status bar - show version on startup
-        self.statusBar().showMessage(f"Ready - ReadAnything v{VERSION_NAME}")
+        self.statusBar().showMessage(f"Ready - ReadAnything v{self.version_display}")
     
     def set_window_icon(self):
         """Set the window icon"""
@@ -853,7 +877,7 @@ class ReadAnythingApp(QMainWindow):
         """Show About dialog with usage instructions"""
         about_text = f"""
 <h2>ReadAnything</h2>
-<p><b>Version {VERSION_NAME}</b></p>
+<p><b>Version {get_version_display()}</b></p>
 <p>A minimalistic text-to-speech application for macOS and Linux.</p>
 
 <h3>How to Use</h3>
@@ -1008,9 +1032,6 @@ class ReadAnythingApp(QMainWindow):
         """Discover available Piper TTS voice models."""
         piper_voices = []
         
-        if not PIPER_TTS_AVAILABLE:
-            return piper_voices
-        
         # Common Piper voice model locations
         possible_paths = [
             Path.home() / '.local' / 'share' / 'piper' / 'voices',
@@ -1065,10 +1086,17 @@ class ReadAnythingApp(QMainWindow):
         # Populate system voices first
         self.populate_voices_old()
         
-        # Add Piper voices if available
-        if PIPER_TTS_AVAILABLE:
-            piper_voices = self.discover_piper_voices()
+        # Add Piper voices if models are installed (listing does not require piper binary)
+        piper_voices = self.discover_piper_voices()
+        if piper_voices:
+            try:
+                self.voice_combo.insertSeparator(self.voice_combo.count())
+            except Exception:
+                pass
             for display_name, model_path in piper_voices:
+                # If piper binary is missing, still list voices, but make it obvious
+                if not PIPER_TTS_AVAILABLE:
+                    display_name = f"{display_name} (install piper binary to use)"
                 self.voice_combo.addItem(display_name, model_path)
     
     def populate_voices_old(self):
